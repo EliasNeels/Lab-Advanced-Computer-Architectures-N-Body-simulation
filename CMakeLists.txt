@@ -47,6 +47,14 @@ FetchContent_MakeAvailable(imgui)
 # For initial testing, we only use main.cpp to avoid errors from incomplete files
 set(SOURCES 
     "src/main.cpp"
+    "src/renderer.cpp"
+    "cuda/bounding_box.cu"
+    "cuda/morton_sort.cu"
+    "cuda/build_tree_and_com.cu"
+    "cuda/force_calculation.cu"
+    "cuda/integration.cu"
+    "cuda/collision.cu"
+    "cuda/graphics_interop.cu"
 )
 
 file(GLOB IMGUI_SOURCES 

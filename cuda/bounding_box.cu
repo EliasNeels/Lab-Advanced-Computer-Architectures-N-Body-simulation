@@ -74,10 +74,14 @@ void launchBoundingBox(const Bodies& bodies, BoundingBox* d_bbox, cudaStream_t s
     // d_bbox layout: min_x, min_y, max_x, max_y (4 floats)
     // Use int representation for atomic compatibility
     int initInts[4];
-    initInts[0] = __float_as_int(FLT_MAX);   // min_x initial
-    initInts[1] = __float_as_int(FLT_MAX);   // min_y initial
-    initInts[2] = __float_as_int(-FLT_MAX);  // max_x initial
-    initInts[3] = __float_as_int(-FLT_MAX);  // max_y initial
+    float f1 = FLT_MAX;
+    float f2 = FLT_MAX;
+    float f3 = -FLT_MAX;
+    float f4 = -FLT_MAX;
+    initInts[0] = *reinterpret_cast<int*>(&f1);   // min_x initial
+    initInts[1] = *reinterpret_cast<int*>(&f2);   // min_y initial
+    initInts[2] = *reinterpret_cast<int*>(&f3);  // max_x initial
+    initInts[3] = *reinterpret_cast<int*>(&f4);  // max_y initial
     CUDA_CHECK(cudaMemcpyAsync(d_bbox, initInts, 4 * sizeof(float),
                                 cudaMemcpyHostToDevice, stream));
 
