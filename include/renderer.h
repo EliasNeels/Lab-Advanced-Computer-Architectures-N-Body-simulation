@@ -8,11 +8,11 @@
 
 // Spawn state shared between callback and main loop
 struct SpawnState {
-    bool justPressed = false;   // Set by callback on press
-    bool justReleased = false;  // Set by callback on release
-    bool holding = false;       // True while button is held
-    double pressX = 0, pressY = 0;     // Screen coords where pressed
-    double releaseX = 0, releaseY = 0; // Screen coords where released
+    bool justPressed = false;
+    bool justReleased = false;
+    bool holding = false;
+    double pressX = 0, pressY = 0;
+    double releaseX = 0, releaseY = 0;
 };
 
 class Renderer {
@@ -30,12 +30,12 @@ public:
     void screenToWorld(double screenX, double screenY, float& worldX, float& worldY);
 
     GLFWwindow* getWindow() const { return window; }
-    float getCameraX() const { return cameraX; }
-    float getCameraY() const { return cameraY; }
-    float getCameraZoom() const { return cameraZoom; }
     
-    void setCamera(float x, float y, float zoom) {
-        cameraX = x; cameraY = y; cameraZoom = zoom;
+    // 3D orbital camera
+    void setCamera3D(float targetX, float targetY, float targetZ,
+                     float distance, float theta, float phi) {
+        camTargetX = targetX; camTargetY = targetY; camTargetZ = targetZ;
+        camDistance = distance; camTheta = theta; camPhi = phi;
     }
     
     SpawnState spawnState;
@@ -51,11 +51,18 @@ private:
     float* h_vbo_data;
     int maxBodies;
 
-    float cameraX, cameraY, cameraZoom;
+    // 3D orbital camera (spherical coordinates)
+    float camTargetX, camTargetY, camTargetZ;  // look-at point
+    float camDistance;                           // distance from target
+    float camTheta;                             // horizontal angle (radians)
+    float camPhi;                               // vertical angle (radians)
+    
+    // Mouse state for rotation
+    bool mouseRotating;
+    double lastMouseX, lastMouseY;
 
     GLuint compileShaders();
     
-    // GLFW callbacks (static because GLFW is C-style)
     static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
     static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset);
 };

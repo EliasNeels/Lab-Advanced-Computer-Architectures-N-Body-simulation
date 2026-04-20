@@ -1,99 +1,83 @@
 #include <cuda_runtime.h>
-#include "../include/quadtree.h"
+#include "../include/tree.h"
 #include "../include/body.h"
 #include "../include/kernels.cuh"
+
 // =====================================================================
-// Kernel 5: Force Calculation (Barnes-Hut Tree Traversal)
+// Kernel 5: 3D Force Calculation (Barnes-Hut Octree Traversal)
 //           + Analytic Dark Matter Halo (Logarithmic Potential)
 // =====================================================================
-//
-// The DM halo uses a logarithmic potential: V(r) = 0.5 * v_c^2 * ln(r^2 + r_c^2)
-// This gives acceleration: a = -v_c^2 * r / (r^2 + r_c^2)
-// which produces a FLAT rotation curve at large r (just like real galaxies).
-// No extra particles needed — it's a smooth background potential.
 
 __global__ void kernelCalculateForces(
-    const float* __restrict__ pos_x, const float* __restrict__ pos_y,
-    const float* __restrict__ mass, float* __restrict__ acc_x, float* __restrict__ acc_y,
-    const QuadNode* __restrict__ nodes, int n, float theta, float G, float softeningSq,
+    const float* __restrict__ pos_x, const float* __restrict__ pos_y, const float* __restrict__ pos_z,
+    const float* __restrict__ mass, 
+    float* __restrict__ acc_x, float* __restrict__ acc_y, float* __restrict__ acc_z,
+    const OctNode* __restrict__ nodes, int n, float theta, float G, float softeningSq,
     float haloVcSq, float haloCoreSq)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
 
-    // Load body position
     float px = pos_x[i];
     float py = pos_y[i];
+    float pz = pos_z[i];
     
-    // Accumulators for acceleration
-    float ax = 0.0f;
-    float ay = 0.0f;
+    float ax = 0.0f, ay = 0.0f, az = 0.0f;
 
-    // Start at the root node (index 0)
-    int curr = 0; 
+    int curr = 0;
     
-    // Stackless traversal: we follow the 'next' pointer or descend into 'children'
     while (curr != -1) {
-        QuadNode node = nodes[curr];
+        OctNode node = nodes[curr];
         
         float dx = node.com_x - px;
         float dy = node.com_y - py;
-        float distSq = dx * dx + dy * dy + softeningSq;
+        float dz = node.com_z - pz;
+        float distSq = dx * dx + dy * dy + dz * dz + softeningSq;
         float dist = sqrtf(distSq);
         
-        // MAC (Multipole Acceptance Criterion): 
-        // We can treat this node as a single distant heavy body if:
-        // 1. It is a leaf node (no children to open)
-        // 2. OR it is far enough away relative to its size (size / distance < theta)
         if (node.children == 0 || (node.size / dist) < theta) {
-            
             if (node.children == 0) { 
-                // Leaf Node: To be completely accurate and avoid self-interaction, 
-                // we iterate over all actual bodies within this leaf.
                 for (int b = node.body_start; b < node.body_start + node.body_count; b++) {
-                    if (b != i) { // Do not attract yourself!
+                    if (b != i) {
                         float b_dx = pos_x[b] - px;
                         float b_dy = pos_y[b] - py;
-                        float b_distSq = b_dx * b_dx + b_dy * b_dy + softeningSq;
+                        float b_dz = pos_z[b] - pz;
+                        float b_distSq = b_dx * b_dx + b_dy * b_dy + b_dz * b_dz + softeningSq;
                         float invDist = rsqrtf(b_distSq);
                         float invDist3 = invDist * invDist * invDist;
                         
                         ax += G * mass[b] * b_dx * invDist3;
                         ay += G * mass[b] * b_dy * invDist3;
+                        az += G * mass[b] * b_dz * invDist3;
                     }
                 }
             } else { 
-                // Internal Node: Treat its entire mass as sitting at its Center of Mass.
-                float invDist = 1.0f / dist; 
+                float invDist = 1.0f / dist;
                 float invDist3 = invDist * invDist * invDist;
                 
                 ax += G * node.total_mass * dx * invDist3;
                 ay += G * node.total_mass * dy * invDist3;
+                az += G * node.total_mass * dz * invDist3;
             }
-            
-            // Skip checking the children of this node, move to the next branch
-            curr = node.next; 
+            curr = node.next;
         } else {
-            // Node is an internal node and it is too close! 
-            // We must "open" it and examine its children in more detail.
             curr = node.children;
         }
     }
     
-    // ===== DARK MATTER HALO (analytic logarithmic potential) =====
-    // Acceleration: a = -v_c^2 * pos / (|pos|^2 + r_c^2)
-    // This creates a flat rotation curve at large radii, just like real galaxies.
-    // The core radius r_c prevents singularity at the center.
-    float r_sq_halo = px * px + py * py + haloCoreSq;
+    // Dark matter halo (logarithmic potential, centered at origin)
+    // Only XY plane — galaxies are thin disks, halo acts in the plane
+    float r_sq_halo = px * px + py * py + pz * pz + haloCoreSq;
     ax -= haloVcSq * px / r_sq_halo;
     ay -= haloVcSq * py / r_sq_halo;
+    az -= haloVcSq * pz / r_sq_halo;
     
     acc_x[i] = ax;
     acc_y[i] = ay;
+    acc_z[i] = az;
 }
 
-// Host launcher
-void launchForceCalculation(Bodies& bodies, const Quadtree& tree, 
+void launchForceCalculation(Bodies& bodies, const Octree& tree, 
                             float theta, float G, float softening,
                             float haloVcSq, float haloCoreSq,
                             cudaStream_t stream) {
@@ -105,7 +89,8 @@ void launchForceCalculation(Bodies& bodies, const Quadtree& tree,
     float softeningSq = softening * softening;
     
     kernelCalculateForces<<<numBlocks, blockSize, 0, stream>>>(
-        bodies.pos_x, bodies.pos_y, bodies.mass, bodies.acc_x, bodies.acc_y,
+        bodies.pos_x, bodies.pos_y, bodies.pos_z,
+        bodies.mass, bodies.acc_x, bodies.acc_y, bodies.acc_z,
         tree.nodes, bodies.count, theta, G, softeningSq,
         haloVcSq, haloCoreSq
     );

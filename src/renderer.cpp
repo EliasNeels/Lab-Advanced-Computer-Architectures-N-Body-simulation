@@ -4,50 +4,44 @@
 #include <vector>
 #include <cmath>
 
-// Forward declaration of the CUDA kernel launcher
 extern "C" void launchPackVBO(const Bodies& bodies, float* d_vbo, cudaStream_t stream);
 
-// Vertex Shader: positions the points and sets their size based on radius and camera zoom
+// =====================================================================
+// 3D Vertex Shader: Perspective projection with orbital camera
+// =====================================================================
 const char* vertexShaderSource = R"(
 #version 450 core
-layout (location = 0) in vec4 aData; // x, y, radius, padding
+layout (location = 0) in vec4 aData; // x, y, z, radius
 
-uniform vec2 cameraPos;
-uniform float cameraZoom;
-uniform vec2 resolution;
+uniform mat4 uMVP;
+uniform float uScreenHeight;
 
 out float vRadius;
-out vec2 vWorldPos;
+out vec3 vWorldPos;
 
 void main() {
-    // Transform from world space to NDC (Normalized Device Coordinates)
-    vec2 pos = (aData.xy - cameraPos) * cameraZoom;
+    vec4 worldPos = vec4(aData.xyz, 1.0);
+    gl_Position = uMVP * worldPos;
     
-    // Adjust for aspect ratio
-    float aspect = resolution.x / resolution.y;
-    pos.x /= aspect;
-
-    gl_Position = vec4(pos, 0.0, 1.0);
-    
-    // Scale point size based on body radius and camera zoom
-    float pointSize = aData.z * cameraZoom * resolution.y * 0.5;
-    
-    // Clamp point size to visible bounds (driver dependent, usually 1 to 64)
+    // Scale point size by inverse distance (perspective effect)
+    float dist = gl_Position.w;
+    float pointSize = aData.w * uScreenHeight * 0.3 / max(dist, 1.0);
     gl_PointSize = clamp(pointSize, 1.5, 128.0);
     
-    vRadius = aData.z;
-    vWorldPos = aData.xy;
+    vRadius = aData.w;
+    vWorldPos = aData.xyz;
 }
 )";
 
-// Fragment Shader: draws a glowing circle with mass-based coloring
-// Uses a multi-layer glow technique for a stunning nebula/galaxy look
+// =====================================================================
+// 3D Fragment Shader: Glowing stars with spectral coloring
+// =====================================================================
 const char* fragmentShaderSource = R"(
 #version 450 core
 out vec4 FragColor;
 
 in float vRadius;
-in vec2 vWorldPos;
+in vec3 vWorldPos;
 
 uniform float uTime;
 
@@ -59,60 +53,42 @@ void main() {
     
     float dist = sqrt(distSq);
     
-    // ---- Classify body by radius/mass ----
-    // Central black hole: radius >= 5.0
-    // Bulge stars: radius ~0.5
-    // Spiral arm stars: radius ~0.4
-    // Spawned bodies: radius > 1.0 (mass-dependent)
-    
     vec3 color;
     float alpha;
     
     if (vRadius >= 5.0) {
         // ===== SUPERMASSIVE BLACK HOLE =====
-        // Blazing white core with golden accretion disk halo
         float core = exp(-distSq * 8.0);
         float halo = exp(-distSq * 1.5);
         float outerGlow = exp(-distSq * 0.5);
         
-        vec3 coreColor = vec3(1.0, 1.0, 1.0);
-        vec3 haloColor = vec3(1.0, 0.8, 0.3);
-        vec3 outerColor = vec3(0.8, 0.4, 0.1);
-        
-        color = coreColor * core + haloColor * halo * 0.8 + outerColor * outerGlow * 0.4;
+        color = vec3(1.0) * core + vec3(1.0, 0.8, 0.3) * halo * 0.8 + vec3(0.8, 0.4, 0.1) * outerGlow * 0.4;
         alpha = max(core, max(halo * 0.9, outerGlow * 0.5));
     }
     else if (vRadius > 1.2) {
         // ===== SPAWNED / MASSIVE BODY =====
-        // Electric cyan/blue with energetic glow
         float core = exp(-distSq * 6.0);
         float glow = exp(-distSq * 2.0);
         float outerGlow = exp(-distSq * 0.8);
         
         float t = clamp((vRadius - 1.2) / 4.0, 0.0, 1.0);
-        vec3 smallColor = vec3(0.1, 0.6, 1.0);  // electric blue
-        vec3 bigColor   = vec3(0.9, 0.2, 0.5);  // hot pink/magenta for very massive
+        vec3 smallColor = vec3(0.1, 0.6, 1.0);
+        vec3 bigColor   = vec3(0.9, 0.2, 0.5);
         vec3 baseColor = mix(smallColor, bigColor, t);
         
         color = vec3(1.0) * core * 0.8 + baseColor * glow + baseColor * 0.3 * outerGlow;
         alpha = max(core, max(glow * 0.8, outerGlow * 0.3));
     }
     else {
-        // ===== GALAXY STARS (bulge + spiral arms) =====
-        // Milky Way color gradient:
-        //   Center bulge → warm golden/amber (old population II stars)
-        //   Mid disk → warm white (Sun-like stars)
-        //   Outer arms → blue-white (young hot OB stars + star-forming regions)
-        float posHash = fract(sin(dot(vWorldPos * 0.01, vec2(12.9898, 78.233))) * 43758.5453);
+        // ===== GALAXY STARS =====
+        float posHash = fract(sin(dot(vWorldPos.xy * 0.01, vec2(12.9898, 78.233))) * 43758.5453);
         
-        // Distance from galactic center (normalized to galaxy radius)
         float galacticDist = length(vWorldPos);
         float t = clamp(galacticDist / 600.0 + posHash * 0.15 - 0.075, 0.0, 1.0);
         
-        // Color palette inspired by real Milky Way observations
-        vec3 bulgeColor = vec3(1.0, 0.7, 0.35);    // warm golden (bulge)
-        vec3 diskColor  = vec3(1.0, 0.92, 0.78);    // warm white (disk)
-        vec3 armColor   = vec3(0.65, 0.82, 1.0);    // cool blue-white (young stars)
+        vec3 bulgeColor = vec3(1.0, 0.7, 0.35);
+        vec3 diskColor  = vec3(1.0, 0.92, 0.78);
+        vec3 armColor   = vec3(0.65, 0.82, 1.0);
         
         vec3 starColor;
         if (t < 0.35) {
@@ -121,14 +97,12 @@ void main() {
             starColor = mix(diskColor, armColor, (t - 0.35) / 0.65);
         }
         
-        // Soft circular glow (galaxy stars are tiny, so the glow IS the star)
         float core = exp(-distSq * 4.0);
         float glow = exp(-distSq * 1.5);
         
         color = starColor * core * 1.2 + starColor * 0.6 * glow;
         alpha = core * 0.9 + glow * 0.35;
         
-        // Subtle twinkle effect 
         float twinkle = 0.9 + 0.1 * sin(uTime * 2.5 + posHash * 6.28);
         color *= twinkle;
         alpha *= twinkle;
@@ -141,7 +115,10 @@ void main() {
 Renderer::Renderer(int width, int height)
     : windowWidth(width), windowHeight(height), window(nullptr), 
       vao(0), vbo(0), shaderProgram(0), d_vbo_data(nullptr), h_vbo_data(nullptr),
-      maxBodies(1000000), cameraX(0), cameraY(0), cameraZoom(0.001f) 
+      maxBodies(1000000),
+      camTargetX(0), camTargetY(0), camTargetZ(0),
+      camDistance(1500.0f), camTheta(0.0f), camPhi(0.4f),
+      mouseRotating(false), lastMouseX(0), lastMouseY(0)
 {}
 
 Renderer::~Renderer() {
@@ -155,7 +132,6 @@ Renderer::~Renderer() {
 }
 
 bool Renderer::init() {
-    // 1. Initialize GLFW
     if (!glfwInit()) {
         std::cerr << "Failed to initialize GLFW" << std::endl;
         return false;
@@ -164,9 +140,9 @@ bool Renderer::init() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_SAMPLES, 4); // MSAA for smoother points
+    glfwWindowHint(GLFW_SAMPLES, 4);
 
-    window = glfwCreateWindow(windowWidth, windowHeight, "CUDA N-Body Barnes-Hut", nullptr, nullptr);
+    window = glfwCreateWindow(windowWidth, windowHeight, "CUDA N-Body 3D", nullptr, nullptr);
     if (!window) {
         std::cerr << "Failed to create window" << std::endl;
         glfwTerminate();
@@ -174,20 +150,16 @@ bool Renderer::init() {
     }
 
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(0); // Disable VSync for testing max speed
+    glfwSwapInterval(0);
 
-    // 2. Initialize GLEW
     glewExperimental = GL_TRUE;
     if (glewInit() != GLEW_OK) {
         std::cerr << "Failed to initialize GLEW" << std::endl;
         return false;
     }
 
-    // 3. Compile Shaders
     shaderProgram = compileShaders();
 
-    // 4. Setup OpenGL Buffers (VAO/VBO)
-    // We allocate a maximum size buffer equivalent to 1,000,000 bodies (vec4 each)
     cudaMalloc(&d_vbo_data, maxBodies * sizeof(float) * 4);
     h_vbo_data = new float[maxBodies * 4];
     
@@ -198,21 +170,18 @@ bool Renderer::init() {
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferData(GL_ARRAY_BUFFER, maxBodies * sizeof(float) * 4, nullptr, GL_DYNAMIC_DRAW);
 
-    // vertex attribute 0 (aData: vec4)
     glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
 
-    // OpenGL State
     glEnable(GL_PROGRAM_POINT_SIZE);
     glEnable(GL_BLEND);
-    // Additive blending: overlapping stars create a brighter glow (realistic galaxy look)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE); // Additive blending
     glEnable(GL_MULTISAMPLE);
+    // No depth test — additive blending particles don't need it
+    glDisable(GL_DEPTH_TEST);
 
-    // Register mouse callback and store 'this' pointer for access from the static callback
     glfwSetWindowUserPointer(window, this);
     glfwSetMouseButtonCallback(window, Renderer::mouseButtonCallback);
-    // Register scroll callback for zoom
     glfwSetScrollCallback(window, Renderer::scrollCallback);
 
     return true;
@@ -221,18 +190,75 @@ bool Renderer::init() {
 void Renderer::updateVBO(Bodies& bodies, cudaStream_t stream) {
     if (bodies.count == 0) return;
 
-    // Launch kernel to tightly pack X, Y, and Radius from SoA layout to AoS VBO layout
     launchPackVBO(bodies, d_vbo_data, stream);
-    
-    // Copy to host
     cudaMemcpyAsync(h_vbo_data, d_vbo_data, bodies.count * sizeof(float) * 4, cudaMemcpyDeviceToHost, stream);
-    
-    // Unmap the VBO before OpenGL tries to draw it
     cudaStreamSynchronize(stream);
     
-    // Bind and specify sub-data
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, bodies.count * sizeof(float) * 4, h_vbo_data);
+}
+
+// =====================================================================
+// Simple 4x4 matrix math (avoiding glm dependency)
+// =====================================================================
+struct Mat4 {
+    float m[16];
+};
+
+static Mat4 mat4Identity() {
+    Mat4 r = {};
+    r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f;
+    return r;
+}
+
+static Mat4 mat4Multiply(const Mat4& a, const Mat4& b) {
+    Mat4 r = {};
+    // Column-major multiply: R[row][col] = sum_k A[row][k] * B[k][col]
+    for (int col = 0; col < 4; col++)
+        for (int row = 0; row < 4; row++)
+            for (int k = 0; k < 4; k++)
+                r.m[col * 4 + row] += a.m[k * 4 + row] * b.m[col * 4 + k];
+    return r;
+}
+
+static Mat4 mat4Perspective(float fovY, float aspect, float nearZ, float farZ) {
+    Mat4 r = {};
+    float f = 1.0f / tanf(fovY * 0.5f);
+    r.m[0] = f / aspect;
+    r.m[5] = f;
+    r.m[10] = (farZ + nearZ) / (nearZ - farZ);
+    r.m[11] = -1.0f;
+    r.m[14] = (2.0f * farZ * nearZ) / (nearZ - farZ);
+    return r;
+}
+
+static Mat4 mat4LookAt(float eyeX, float eyeY, float eyeZ,
+                       float centerX, float centerY, float centerZ,
+                       float upX, float upY, float upZ) {
+    float fx = centerX - eyeX, fy = centerY - eyeY, fz = centerZ - eyeZ;
+    float flen = sqrtf(fx*fx + fy*fy + fz*fz);
+    fx /= flen; fy /= flen; fz /= flen;
+    
+    // s = f × up
+    float sx = fy * upZ - fz * upY;
+    float sy = fz * upX - fx * upZ;
+    float sz = fx * upY - fy * upX;
+    float slen = sqrtf(sx*sx + sy*sy + sz*sz);
+    sx /= slen; sy /= slen; sz /= slen;
+    
+    // u = s × f
+    float ux = sy * fz - sz * fy;
+    float uy = sz * fx - sx * fz;
+    float uz = sx * fy - sy * fx;
+    
+    Mat4 r = mat4Identity();
+    r.m[0] = sx;  r.m[4] = sy;  r.m[8]  = sz;
+    r.m[1] = ux;  r.m[5] = uy;  r.m[9]  = uz;
+    r.m[2] = -fx; r.m[6] = -fy; r.m[10] = -fz;
+    r.m[12] = -(sx * eyeX + sy * eyeY + sz * eyeZ);
+    r.m[13] = -(ux * eyeX + uy * eyeY + uz * eyeZ);
+    r.m[14] = (fx * eyeX + fy * eyeY + fz * eyeZ);
+    return r;
 }
 
 void Renderer::render(int bodyCount) {
@@ -240,25 +266,31 @@ void Renderer::render(int bodyCount) {
     glfwGetFramebufferSize(window, &width, &height);
     glViewport(0, 0, width, height);
 
-    // Deep space background with very subtle blue tint
     glClearColor(0.005f, 0.005f, 0.015f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
     glUseProgram(shaderProgram);
 
-    // Process basic camera input
     processInput();
 
-    // Set Uniforms
-    glUniform2f(glGetUniformLocation(shaderProgram, "cameraPos"), cameraX, cameraY);
-    glUniform1f(glGetUniformLocation(shaderProgram, "cameraZoom"), cameraZoom);
-    glUniform2f(glGetUniformLocation(shaderProgram, "resolution"), (float)width, (float)height);
+    // Build MVP from orbital camera
+    float aspect = (float)width / (float)height;
+    Mat4 proj = mat4Perspective(0.9f, aspect, 1.0f, 100000.0f);  // ~51° FOV
     
-    // Time uniform for animation effects
+    // Spherical to Cartesian for eye position
+    float eyeX = camTargetX + camDistance * cosf(camPhi) * sinf(camTheta);
+    float eyeY = camTargetY + camDistance * sinf(camPhi);
+    float eyeZ = camTargetZ + camDistance * cosf(camPhi) * cosf(camTheta);
+    
+    Mat4 view = mat4LookAt(eyeX, eyeY, eyeZ, camTargetX, camTargetY, camTargetZ, 0, 1, 0);
+    Mat4 mvp = mat4Multiply(proj, view);
+
+    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "uMVP"), 1, GL_FALSE, mvp.m);
+    glUniform1f(glGetUniformLocation(shaderProgram, "uScreenHeight"), (float)height);
+    
     float time = (float)glfwGetTime();
     glUniform1f(glGetUniformLocation(shaderProgram, "uTime"), time);
 
-    // Draw
     glBindVertexArray(vao);
     glDrawArrays(GL_POINTS, 0, bodyCount);
 }
@@ -276,18 +308,49 @@ void Renderer::processInput() {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
     
-    float speed = 0.5f / cameraZoom;
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) cameraY += speed * 0.016f;
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) cameraY -= speed * 0.016f;
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) cameraX -= speed * 0.016f;
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) cameraX += speed * 0.016f;
-
-    if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) cameraZoom *= 1.02f;
-    if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) cameraZoom /= 1.02f;
+    float speed = camDistance * 0.01f;
     
-    // R key to reset camera
+    // WASD pans the look-at target
+    // Compute camera-relative forward/right on the XZ plane
+    float fwdX = sinf(camTheta), fwdZ = cosf(camTheta);
+    float rightX = cosf(camTheta), rightZ = -sinf(camTheta);
+    
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) { camTargetX += fwdX * speed * 0.016f; camTargetZ += fwdZ * speed * 0.016f; }
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) { camTargetX -= fwdX * speed * 0.016f; camTargetZ -= fwdZ * speed * 0.016f; }
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) { camTargetX -= rightX * speed * 0.016f; camTargetZ -= rightZ * speed * 0.016f; }
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) { camTargetX += rightX * speed * 0.016f; camTargetZ += rightZ * speed * 0.016f; }
+    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) camTargetY += speed * 0.016f;
+    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) camTargetY -= speed * 0.016f;
+    
+    if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) camDistance *= 0.98f;
+    if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) camDistance *= 1.02f;
+    
+    // R = reset camera
     if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
-        cameraX = 0; cameraY = 0; cameraZoom = 0.001f;
+        camTargetX = 0; camTargetY = 0; camTargetZ = 0;
+        camDistance = 1500.0f; camTheta = 0.0f; camPhi = 0.4f;
+    }
+    
+    // Right-click drag to rotate camera
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
+        double mx, my;
+        glfwGetCursorPos(window, &mx, &my);
+        if (!mouseRotating) {
+            mouseRotating = true;
+            lastMouseX = mx;
+            lastMouseY = my;
+        } else {
+            float dx = (float)(mx - lastMouseX) * 0.005f;
+            float dy = (float)(my - lastMouseY) * 0.005f;
+            camTheta -= dx;
+            camPhi += dy;
+            // Clamp phi to avoid gimbal lock (keep between -89° and +89°)
+            camPhi = fmaxf(-1.5f, fminf(1.5f, camPhi));
+            lastMouseX = mx;
+            lastMouseY = my;
+        }
+    } else {
+        mouseRotating = false;
     }
 }
 
@@ -296,7 +359,6 @@ GLuint Renderer::compileShaders() {
     glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
     glCompileShader(vertexShader);
     
-    // Check vertex shader compile errors
     GLint success;
     glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
     if (!success) {
@@ -309,7 +371,6 @@ GLuint Renderer::compileShaders() {
     glShaderSource(fragmentShader, 1, &fragmentShaderSource, NULL);
     glCompileShader(fragmentShader);
     
-    // Check fragment shader compile errors
     glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
     if (!success) {
         char log[512];
@@ -322,7 +383,6 @@ GLuint Renderer::compileShaders() {
     glAttachShader(program, fragmentShader);
     glLinkProgram(program);
     
-    // Check link errors
     glGetProgramiv(program, GL_LINK_STATUS, &success);
     if (!success) {
         char log[512];
@@ -337,15 +397,18 @@ GLuint Renderer::compileShaders() {
 }
 
 void Renderer::screenToWorld(double screenX, double screenY, float& worldX, float& worldY) {
+    // For 3D, project onto the XY plane at z=0
     int width, height;
     glfwGetFramebufferSize(window, &width, &height);
-    float aspect = (float)width / (float)height;
     
-    float ndcX = (2.0f * (float)screenX / width - 1.0f) * aspect;
+    // Simple approximation: map screen coords relative to camera target
+    float ndcX = (2.0f * (float)screenX / width - 1.0f);
     float ndcY = -(2.0f * (float)screenY / height - 1.0f);
     
-    worldX = ndcX / cameraZoom + cameraX;
-    worldY = ndcY / cameraZoom + cameraY;
+    float fov = 0.9f;
+    float aspect = (float)width / (float)height;
+    worldX = camTargetX + ndcX * camDistance * tanf(fov * 0.5f) * aspect;
+    worldY = camTargetY + ndcY * camDistance * tanf(fov * 0.5f);
 }
 
 void Renderer::mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
@@ -376,8 +439,10 @@ void Renderer::scrollCallback(GLFWwindow* window, double xoff, double yoff) {
     
     float zoomFactor = 1.1f;
     if (yoff > 0) {
-        self->cameraZoom *= zoomFactor;
+        self->camDistance /= zoomFactor;
     } else if (yoff < 0) {
-        self->cameraZoom /= zoomFactor;
+        self->camDistance *= zoomFactor;
     }
+    // Clamp distance
+    self->camDistance = fmaxf(10.0f, fminf(50000.0f, self->camDistance));
 }

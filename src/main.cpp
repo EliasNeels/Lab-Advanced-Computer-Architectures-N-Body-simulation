@@ -6,7 +6,7 @@
 #include <string>
 
 #include "../include/body.h"
-#include "../include/quadtree.h"
+#include "../include/tree.h"
 #include "../include/BoundingBox.h"
 #include "../include/cuda_utils.h"
 #include "../include/renderer.h"
@@ -23,8 +23,8 @@ int main(int argc, char** argv) {
     // =====================================================================
     std::cout << std::endl;
     std::cout << "╔══════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║     CUDA N-Body Simulation                      ║" << std::endl;
-    std::cout << "║     Barnes-Hut Algorithm | Leapfrog Integration ║" << std::endl;
+    std::cout << "║     CUDA N-Body Simulation  ★ 3D ★             ║" << std::endl;
+    std::cout << "║     Barnes-Hut Octree | Leapfrog Integration   ║" << std::endl;
     std::cout << "╠══════════════════════════════════════════════════╣" << std::endl;
     std::cout << "║  Select simulation:                             ║" << std::endl;
     std::cout << "║    1. Milky Way Galaxy                          ║" << std::endl;
@@ -33,7 +33,6 @@ int main(int argc, char** argv) {
     
     int selection = 0;
     
-    // Allow command-line arg or interactive input
     if (argc > 1) {
         selection = std::atoi(argv[1]);
     }
@@ -61,7 +60,7 @@ int main(int argc, char** argv) {
     int N = (int)scenario.bodies.size();
     int maxCapacity = N + cfg.extraCapacity;
     
-    std::cout << "\n  ► Loading: " << cfg.name << std::endl;
+    std::cout << "\n  ► Loading: " << cfg.name << " (3D)" << std::endl;
     std::cout << "  ► Bodies: " << N << "  |  Max: " << maxCapacity << std::endl;
     std::cout << "  ► θ=" << cfg.theta << "  G=" << cfg.G 
               << "  ε=" << cfg.softening << std::endl;
@@ -78,7 +77,6 @@ int main(int argc, char** argv) {
     bodiesAllocDevice(d_bodies, maxCapacity);
     bodiesUpload(d_bodies, scenario.bodies.data(), N);
     
-    // Free the host copy now (it can be large)
     scenario.bodies.clear();
     scenario.bodies.shrink_to_fit();
 
@@ -89,7 +87,6 @@ int main(int argc, char** argv) {
     std::cout << "[1/5] Running bounding box reduction..." << std::endl;
     launchBoundingBox(d_bodies, d_bbox, 0);
     
-    // Pre-allocate ALL GPU scratch buffers (zero per-frame allocations)
     uint32_t* d_mortonKeys = nullptr;
     uint32_t* d_mortonKeysOut = nullptr;
     int* d_indicesIn = nullptr;
@@ -109,31 +106,28 @@ int main(int argc, char** argv) {
     launchMortonSort(d_bodies, d_scratch, d_bbox, d_mortonKeys, d_mortonKeysOut, 
                      d_indicesIn, d_sortedIndices, d_tempStorage, tempStorageBytes, 0);
 
-    // Build Tree
-    Quadtree tree;
+    Octree tree;
     tree.nodes = nullptr;
     tree.parents = nullptr;
     tree.nodeCount = nullptr;
     tree.maxNodes = 0;
     int leafCapacity = 16;
     
-    // Renderer
     Renderer renderer(1600, 1000);
     if (!renderer.init()) {
         std::cerr << "Failed to initialize renderer!" << std::endl;
         return -1;
     }
-    renderer.setCamera(cfg.cameraX, cfg.cameraY, cfg.initialZoom);
+    renderer.setCamera3D(cfg.camTargetX, cfg.camTargetY, cfg.camTargetZ,
+                         cfg.camDistance, cfg.camTheta, cfg.camPhi);
     
     auto lastTime = std::chrono::high_resolution_clock::now();
     int frames = 0;
     
-    // Spawning state
     auto spawnStartTime = std::chrono::high_resolution_clock::now();
     float spawnWorldX = 0, spawnWorldY = 0;
     float massGrowthRate = 500.0f;
 
-    // Initial force computation (needed for Leapfrog bootstrap)
     std::cout << "[3/5] Initializing forces for Leapfrog..." << std::endl;
     launchBoundingBox(d_bodies, d_bbox, 0);
     launchMortonSort(d_bodies, d_scratch, d_bbox, d_mortonKeys, d_mortonKeysOut, 
@@ -144,17 +138,18 @@ int main(int argc, char** argv) {
     cudaDeviceSynchronize();
 
     std::cout << "[4/5] Setup complete!" << std::endl;
-    std::cout << "[5/5] Starting Simulation..." << std::endl;
+    std::cout << "[5/5] Starting 3D Simulation..." << std::endl;
     std::cout << std::endl;
     std::cout << "╔══════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║  Controls:                                      ║" << std::endl;
-    std::cout << "║    WASD        — Pan camera                     ║" << std::endl;
-    std::cout << "║    Scroll      — Zoom in/out                    ║" << std::endl;
-    std::cout << "║    Arrow Up/Dn — Zoom in/out (keys)             ║" << std::endl;
-    std::cout << "║    R           — Reset camera                   ║" << std::endl;
-    std::cout << "║    LEFT-CLICK  — Spawn body (hold=grow mass,    ║" << std::endl;
-    std::cout << "║                  drag=aim, release=launch)      ║" << std::endl;
-    std::cout << "║    ESC         — Quit                           ║" << std::endl;
+    std::cout << "║  3D Controls:                                   ║" << std::endl;
+    std::cout << "║    RIGHT-CLICK + DRAG  — Orbit camera           ║" << std::endl;
+    std::cout << "║    Scroll              — Zoom in/out            ║" << std::endl;
+    std::cout << "║    WASD                — Pan camera target      ║" << std::endl;
+    std::cout << "║    SPACE / SHIFT       — Move up / down         ║" << std::endl;
+    std::cout << "║    Arrow Up/Dn         — Zoom in/out (keys)     ║" << std::endl;
+    std::cout << "║    R                   — Reset camera            ║" << std::endl;
+    std::cout << "║    LEFT-CLICK          — Spawn body             ║" << std::endl;
+    std::cout << "║    ESC                 — Quit                    ║" << std::endl;
     std::cout << "╚══════════════════════════════════════════════════╝" << std::endl;
     
     // =====================================================================
@@ -169,7 +164,6 @@ int main(int argc, char** argv) {
             ss.justPressed = false;
             renderer.screenToWorld(ss.pressX, ss.pressY, spawnWorldX, spawnWorldY);
             spawnStartTime = std::chrono::high_resolution_clock::now();
-            std::cout << "Charging body at (" << spawnWorldX << ", " << spawnWorldY << ")..." << std::endl;
         }
         
         bool released = ss.justReleased;
@@ -201,15 +195,16 @@ int main(int argc, char** argv) {
                 BodyHost newBody;
                 newBody.px = spawnWorldX;
                 newBody.py = spawnWorldY;
+                newBody.pz = 0.0f;  // Spawn at z=0
                 newBody.vx = vx;
                 newBody.vy = vy;
+                newBody.vz = 0.0f;
                 newBody.mass = spawnMass;
                 newBody.radius = spawnRadius;
                 bodiesUpload(d_bodies, &newBody, 1);
                 
                 std::cout << "★ Spawned body! Mass: " << spawnMass 
-                         << " Vel: (" << vx << ", " << vy << ")"
-                         << " Total bodies: " << d_bodies.count << std::endl;
+                         << " Total: " << d_bodies.count << std::endl;
             }
         }
 
@@ -219,7 +214,6 @@ int main(int argc, char** argv) {
             
             launchBoundingBox(d_bodies, d_bbox, 0);
             
-            // Morton sort every other substep (cache optimization)
             if (step % 2 == 0) {
                 launchMortonSort(d_bodies, d_scratch, d_bbox, d_mortonKeys, d_mortonKeysOut, 
                                  d_indicesIn, d_sortedIndices, d_tempStorage, tempStorageBytes, 0);
@@ -239,13 +233,11 @@ int main(int argc, char** argv) {
         renderer.render(d_bodies.count);
         renderer.swapBuffers();
         
-        // FPS counter
         frames++;
         auto now = std::chrono::high_resolution_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - lastTime).count() >= 1) {
-            std::string title = "✦ " + cfg.name + " | FPS: " + std::to_string(frames) 
-                              + " | Bodies: " + std::to_string(d_bodies.count) 
-                              + " | θ=" + std::to_string(cfg.theta).substr(0,3);
+            std::string title = "✦ " + cfg.name + " [3D] | FPS: " + std::to_string(frames) 
+                              + " | Bodies: " + std::to_string(d_bodies.count);
             glfwSetWindowTitle(renderer.getWindow(), title.c_str());
             frames = 0;
             lastTime = now;
@@ -254,7 +246,6 @@ int main(int argc, char** argv) {
     
     std::cout << std::endl << "Window closed. Cleaning up..." << std::endl;
     
-    // Cleanup
     cudaFree(d_bbox);
     cudaFree(d_mortonKeys);
     cudaFree(d_mortonKeysOut);
