@@ -3,12 +3,8 @@
 #include "../include/quadtree.h"
 #include "../include/body.h"
 #include "../include/cuda_utils.h"
-
-// Declaration from bounding_box.cu
-struct BoundingBox {
-    float min_x, min_y;
-    float max_x, max_y;
-};
+#include "../include/kernels.cuh"
+#include "../include/BoundingBox.h"
 
 // =====================================================================
 // Kernel 3 & 4: GPU Quadtree Construction & Center of Mass (BFS Layer Method)

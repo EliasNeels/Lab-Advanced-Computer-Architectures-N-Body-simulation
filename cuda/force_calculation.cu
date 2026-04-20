@@ -1,15 +1,22 @@
 #include <cuda_runtime.h>
 #include "../include/quadtree.h"
 #include "../include/body.h"
-
+#include "../include/kernels.cuh"
 // =====================================================================
 // Kernel 5: Force Calculation (Barnes-Hut Tree Traversal)
+//           + Analytic Dark Matter Halo (Logarithmic Potential)
 // =====================================================================
+//
+// The DM halo uses a logarithmic potential: V(r) = 0.5 * v_c^2 * ln(r^2 + r_c^2)
+// This gives acceleration: a = -v_c^2 * r / (r^2 + r_c^2)
+// which produces a FLAT rotation curve at large r (just like real galaxies).
+// No extra particles needed — it's a smooth background potential.
 
 __global__ void kernelCalculateForces(
     const float* __restrict__ pos_x, const float* __restrict__ pos_y,
     const float* __restrict__ mass, float* __restrict__ acc_x, float* __restrict__ acc_y,
-    const QuadNode* __restrict__ nodes, int n, float theta, float G, float softeningSq)
+    const QuadNode* __restrict__ nodes, int n, float theta, float G, float softeningSq,
+    float haloVcSq, float haloCoreSq)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -73,12 +80,23 @@ __global__ void kernelCalculateForces(
         }
     }
     
+    // ===== DARK MATTER HALO (analytic logarithmic potential) =====
+    // Acceleration: a = -v_c^2 * pos / (|pos|^2 + r_c^2)
+    // This creates a flat rotation curve at large radii, just like real galaxies.
+    // The core radius r_c prevents singularity at the center.
+    float r_sq_halo = px * px + py * py + haloCoreSq;
+    ax -= haloVcSq * px / r_sq_halo;
+    ay -= haloVcSq * py / r_sq_halo;
+    
     acc_x[i] = ax;
     acc_y[i] = ay;
 }
 
 // Host launcher
-void launchForceCalculation(Bodies& bodies, const Quadtree& tree, float theta, float G, float softening, cudaStream_t stream = 0) {
+void launchForceCalculation(Bodies& bodies, const Quadtree& tree, 
+                            float theta, float G, float softening,
+                            float haloVcSq, float haloCoreSq,
+                            cudaStream_t stream) {
     if (bodies.count == 0) return;
     
     int blockSize = 256;
@@ -88,6 +106,7 @@ void launchForceCalculation(Bodies& bodies, const Quadtree& tree, float theta, f
     
     kernelCalculateForces<<<numBlocks, blockSize, 0, stream>>>(
         bodies.pos_x, bodies.pos_y, bodies.mass, bodies.acc_x, bodies.acc_y,
-        tree.nodes, bodies.count, theta, G, softeningSq
+        tree.nodes, bodies.count, theta, G, softeningSq,
+        haloVcSq, haloCoreSq
     );
 }

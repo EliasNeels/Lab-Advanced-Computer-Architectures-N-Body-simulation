@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include "../include/quadtree.h"
 #include "../include/body.h"
+#include "../include/kernels.cuh"
 
 // =====================================================================
 // Kernel 6: Collision Detection & Resolution (Quadtree Broad-phase)
@@ -118,7 +119,7 @@ __global__ void kernelResolveCollisions(
 }
 
 // Host launcher
-void launchCollisionDetection(Bodies& bodies, const Quadtree& tree, cudaStream_t stream = 0) {
+void launchCollisionDetection(Bodies& bodies, const Quadtree& tree, cudaStream_t stream) {
     if (bodies.count == 0) return;
     
     int blockSize = 256;

@@ -7,111 +7,107 @@
 
 #include "../include/body.h"
 #include "../include/quadtree.h"
+#include "../include/BoundingBox.h"
 #include "../include/cuda_utils.h"
 #include "../include/renderer.h"
+#include "../include/kernels.cuh"
+#include "../include/scenario.h"
 
-// Declaration from bounding_box.cu
-struct BoundingBox {
-    float min_x, min_y;
-    float max_x, max_y;
-};
-void launchBoundingBox(const Bodies& bodies, BoundingBox* d_bbox, cudaStream_t stream = 0);
+// ===== Scenario headers =====
+#include "../include/scenarios/milky_way.h"
+#include "../include/scenarios/galaxy_collision.h"
 
-// Declaration from morton_sort.cu
-void launchMortonSort(Bodies& bodies, const BoundingBox* d_bbox,
-                      uint32_t* d_mortonKeys, int* d_sortedIndices,
-                      void* d_tempStorage, size_t& tempStorageBytes,
-                      cudaStream_t stream = 0);
-
-// Declaration from build_tree.cu
-void launchBuildTree(Quadtree& tree, Bodies& bodies, const BoundingBox* d_bbox, const uint32_t* d_mortonCodes,
-                     int leafCapacity, cudaStream_t stream = 0);
-
-int main() {
-    std::cout << "Starting CUDA N-Body Simulation..." << std::endl;
-
-    // 1. Initialize bodies
-    int N = 50000;
-    int maxCapacity = N + 5000;
+int main(int argc, char** argv) {
+    // =====================================================================
+    // Scenario Selection
+    // =====================================================================
+    std::cout << std::endl;
+    std::cout << "╔══════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║     CUDA N-Body Simulation                      ║" << std::endl;
+    std::cout << "║     Barnes-Hut Algorithm | Leapfrog Integration ║" << std::endl;
+    std::cout << "╠══════════════════════════════════════════════════╣" << std::endl;
+    std::cout << "║  Select simulation:                             ║" << std::endl;
+    std::cout << "║    1. Milky Way Galaxy                          ║" << std::endl;
+    std::cout << "║    2. Galaxy Collision  ★                       ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════╝" << std::endl;
+    
+    int selection = 0;
+    
+    // Allow command-line arg or interactive input
+    if (argc > 1) {
+        selection = std::atoi(argv[1]);
+    }
+    
+    if (selection < 1 || selection > 2) {
+        std::cout << "\n  Enter choice (1-2): ";
+        std::cin >> selection;
+    }
+    
+    if (selection < 1 || selection > 2) {
+        std::cerr << "Invalid selection!" << std::endl;
+        return -1;
+    }
+    
+    // =====================================================================
+    // Load Scenario
+    // =====================================================================
+    Scenario scenario;
+    switch (selection) {
+        case 1: scenario = createMilkyWay();         break;
+        case 2: scenario = createGalaxyCollision();   break;
+    }
+    
+    const SimulationConfig& cfg = scenario.config;
+    int N = (int)scenario.bodies.size();
+    int maxCapacity = N + cfg.extraCapacity;
+    
+    std::cout << "\n  ► Loading: " << cfg.name << std::endl;
+    std::cout << "  ► Bodies: " << N << "  |  Max: " << maxCapacity << std::endl;
+    std::cout << "  ► θ=" << cfg.theta << "  G=" << cfg.G 
+              << "  ε=" << cfg.softening << std::endl;
+    if (cfg.haloVcSq > 0) {
+        std::cout << "  ► DM Halo: v_c=" << std::sqrt(cfg.haloVcSq)
+                  << "  r_c=" << std::sqrt(cfg.haloCoreSq) << std::endl;
+    }
+    std::cout << std::endl;
+    
+    // =====================================================================
+    // GPU Initialization
+    // =====================================================================
     Bodies d_bodies;
     bodiesAllocDevice(d_bodies, maxCapacity);
+    bodiesUpload(d_bodies, scenario.bodies.data(), N);
     
-    std::vector<BodyHost> h_bodies(N);
-    srand(42);
-    
-    // ===== Milky Way-style Spiral Galaxy =====
-    float centralMass = 200000.0f;
-    float galaxyRadius = 800.0f;
-    int numArms = 4;
-    float armSpread = 0.4f;
-    float armWindFactor = 4.0f;
-    int bulgeCount = N / 5;
-    
-    // Central supermassive black hole
-    h_bodies[0] = {0, 0, 0, 0, centralMass, 8.0f};
-    
-    // --- Central Bulge (dense core) ---
-    for (int i = 1; i <= bulgeCount; i++) {
-        float u1 = std::max(0.0001f, (float)rand() / RAND_MAX);
-        float u2 = (float)rand() / RAND_MAX;
-        float r = std::sqrt(-2.0f * std::log(u1)) * (galaxyRadius * 0.08f);
-        float angle = u2 * 2.0f * (float)M_PI;
-        
-        float orbitR = std::max(r, 3.0f);
-        float v = std::sqrt(0.001f * centralMass / orbitR);
-        h_bodies[i] = {
-            std::cos(angle) * r, std::sin(angle) * r,
-            -std::sin(angle) * v, std::cos(angle) * v,
-            1.0f, 0.5f
-        };
-    }
-    
-    // --- Spiral Arms ---
-    for (int i = bulgeCount + 1; i < N; i++) {
-        int arm = rand() % numArms;
-        float armOffset = arm * (2.0f * (float)M_PI / numArms);
-        
-        float t = (float)rand() / RAND_MAX;
-        float r = (0.1f + t * 0.9f) * galaxyRadius;
-        
-        float spiralAngle = armOffset + armWindFactor * std::log(r / 50.0f + 1.0f);
-        float spread = ((float)rand() / RAND_MAX - 0.5f) * 2.0f * armSpread * (0.3f + 0.7f * t);
-        float angle = spiralAngle + spread;
-        float jitter = ((float)rand() / RAND_MAX - 0.5f) * 30.0f;
-        float finalR = r + jitter;
-        
-        float px = std::cos(angle) * finalR;
-        float py = std::sin(angle) * finalR;
-        float orbitR = std::max(std::sqrt(px*px + py*py), 5.0f);
-        float v = std::sqrt(0.001f * centralMass / orbitR);
-        float posAngle = std::atan2(py, px);
-        
-        h_bodies[i] = {
-            px, py,
-            -std::sin(posAngle) * v, std::cos(posAngle) * v,
-            1.0f, 0.4f
-        };
-    }
-    
-    bodiesUpload(d_bodies, h_bodies.data(), N);
+    // Free the host copy now (it can be large)
+    scenario.bodies.clear();
+    scenario.bodies.shrink_to_fit();
 
     BoundingBox* d_bbox = nullptr;
     CUDA_CHECK(cudaMalloc(&d_bbox, sizeof(BoundingBox)));
     cudaDeviceSynchronize();
 
-    std::cout << "Running bounding box reduction..." << std::endl;
+    std::cout << "[1/5] Running bounding box reduction..." << std::endl;
     launchBoundingBox(d_bodies, d_bbox, 0);
     
+    // Pre-allocate ALL GPU scratch buffers (zero per-frame allocations)
     uint32_t* d_mortonKeys = nullptr;
+    uint32_t* d_mortonKeysOut = nullptr;
+    int* d_indicesIn = nullptr;
     int* d_sortedIndices = nullptr;
     void* d_tempStorage = nullptr;
     size_t tempStorageBytes = 0;
 
-    CUDA_CHECK(cudaMalloc(&d_mortonKeys, maxCapacity * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_mortonKeys,    maxCapacity * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_mortonKeysOut, maxCapacity * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_indicesIn,     maxCapacity * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_sortedIndices, maxCapacity * sizeof(int)));
 
-    std::cout << "Running Morton Sort..." << std::endl;
-    launchMortonSort(d_bodies, d_bbox, d_mortonKeys, d_sortedIndices, d_tempStorage, tempStorageBytes, 0);
+    Bodies d_scratch;
+    bodiesAllocDevice(d_scratch, maxCapacity);
+
+    std::cout << "[2/5] Running Morton Sort..." << std::endl;
+    launchMortonSort(d_bodies, d_scratch, d_bbox, d_mortonKeys, d_mortonKeysOut, 
+                     d_indicesIn, d_sortedIndices, d_tempStorage, tempStorageBytes, 0);
 
     // Build Tree
     Quadtree tree;
@@ -120,50 +116,55 @@ int main() {
     tree.nodeCount = nullptr;
     tree.maxNodes = 0;
     int leafCapacity = 16;
-
-    // Physics parameters
-    float theta = 0.5f;
-    float G = 0.001f;
-    float softening = 1.0f;
-    float dt = 0.05f;
-
-    // Forward declarations
-    void launchForceCalculation(Bodies& bodies, const Quadtree& tree, float theta, float G, float softening, cudaStream_t stream = 0);
-    void launchLeapfrogKickDrift(Bodies& bodies, float dt, cudaStream_t stream = 0);
-    void launchLeapfrogKick(Bodies& bodies, float dt, cudaStream_t stream = 0);
-    void launchCollisionDetection(Bodies& bodies, const Quadtree& tree, cudaStream_t stream = 0);
     
-    // Renderer setup
-    Renderer renderer(1200, 900);
+    // Renderer
+    Renderer renderer(1600, 1000);
     if (!renderer.init()) {
         std::cerr << "Failed to initialize renderer!" << std::endl;
         return -1;
     }
+    renderer.setCamera(cfg.cameraX, cfg.cameraY, cfg.initialZoom);
     
     auto lastTime = std::chrono::high_resolution_clock::now();
     int frames = 0;
     
-    // ===== Spawning state =====
+    // Spawning state
     auto spawnStartTime = std::chrono::high_resolution_clock::now();
     float spawnWorldX = 0, spawnWorldY = 0;
-    float massGrowthRate = 500.0f; // Mass units per second of holding
+    float massGrowthRate = 500.0f;
 
-    std::cout << "Initializing forces for Leapfrog..." << std::endl;
+    // Initial force computation (needed for Leapfrog bootstrap)
+    std::cout << "[3/5] Initializing forces for Leapfrog..." << std::endl;
     launchBoundingBox(d_bodies, d_bbox, 0);
-    launchMortonSort(d_bodies, d_bbox, d_mortonKeys, d_sortedIndices, d_tempStorage, tempStorageBytes, 0);
-    launchBuildTree(tree, d_bodies, d_bbox, d_mortonKeys, leafCapacity, 0);
-    launchForceCalculation(d_bodies, tree, theta, G, softening, 0);
+    launchMortonSort(d_bodies, d_scratch, d_bbox, d_mortonKeys, d_mortonKeysOut, 
+                     d_indicesIn, d_sortedIndices, d_tempStorage, tempStorageBytes, 0);
+    launchBuildTree(tree, d_bodies, d_bbox, d_mortonKeysOut, leafCapacity, 0);
+    launchForceCalculation(d_bodies, tree, cfg.theta, cfg.G, cfg.softening, 
+                           cfg.haloVcSq, cfg.haloCoreSq, 0);
     cudaDeviceSynchronize();
 
-    std::cout << "Starting Graphic Simulation Loop..." << std::endl;
-    std::cout << "Controls: WASD=pan, ArrowUp/Down=zoom, LEFT-CLICK=spawn body (hold to grow mass, drag to aim, release to shoot)" << std::endl;
+    std::cout << "[4/5] Setup complete!" << std::endl;
+    std::cout << "[5/5] Starting Simulation..." << std::endl;
+    std::cout << std::endl;
+    std::cout << "╔══════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║  Controls:                                      ║" << std::endl;
+    std::cout << "║    WASD        — Pan camera                     ║" << std::endl;
+    std::cout << "║    Scroll      — Zoom in/out                    ║" << std::endl;
+    std::cout << "║    Arrow Up/Dn — Zoom in/out (keys)             ║" << std::endl;
+    std::cout << "║    R           — Reset camera                   ║" << std::endl;
+    std::cout << "║    LEFT-CLICK  — Spawn body (hold=grow mass,    ║" << std::endl;
+    std::cout << "║                  drag=aim, release=launch)      ║" << std::endl;
+    std::cout << "║    ESC         — Quit                           ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════╝" << std::endl;
     
+    // =====================================================================
+    // Main Simulation Loop
+    // =====================================================================
     while (!renderer.shouldClose()) {
         // ===== Handle mouse spawning =====
         SpawnState& ss = renderer.spawnState;
         GLFWwindow* win = renderer.getWindow();
         
-        // Detect press via callback (reliable)
         if (ss.justPressed) {
             ss.justPressed = false;
             renderer.screenToWorld(ss.pressX, ss.pressY, spawnWorldX, spawnWorldY);
@@ -171,7 +172,6 @@ int main() {
             std::cout << "Charging body at (" << spawnWorldX << ", " << spawnWorldY << ")..." << std::endl;
         }
         
-        // Detect release via callback OR polling fallback (touchpad fix)
         bool released = ss.justReleased;
         if (!released && ss.holding && glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_LEFT) == GLFW_RELEASE) {
             released = true;
@@ -207,28 +207,32 @@ int main() {
                 newBody.radius = spawnRadius;
                 bodiesUpload(d_bodies, &newBody, 1);
                 
-                std::cout << "Spawned body! Mass: " << spawnMass 
+                std::cout << "★ Spawned body! Mass: " << spawnMass 
                          << " Vel: (" << vx << ", " << vy << ")"
                          << " Total bodies: " << d_bodies.count << std::endl;
             }
         }
 
-        // Leapfrog Phase 1 & 2: Kick (half step) + Drift (full step)
-        launchLeapfrogKickDrift(d_bodies, dt, 0);
-        
-        // Recompute forces for Phase 3 (needed for the next Kick)
-        launchBoundingBox(d_bodies, d_bbox, 0);
-        launchMortonSort(d_bodies, d_bbox, d_mortonKeys, d_sortedIndices, d_tempStorage, tempStorageBytes, 0);
-        launchBuildTree(tree, d_bodies, d_bbox, d_mortonKeys, leafCapacity, 0);
-        launchForceCalculation(d_bodies, tree, theta, G, softening, 0);
-        
-        // Leapfrog Phase 4: Kick (half step) with new forces
-        launchLeapfrogKick(d_bodies, dt, 0);
+        // ===== Physics sub-stepping =====
+        for (int step = 0; step < cfg.subSteps; step++) {
+            launchLeapfrogKickDrift(d_bodies, cfg.dt, 0);
+            
+            launchBoundingBox(d_bodies, d_bbox, 0);
+            
+            // Morton sort every other substep (cache optimization)
+            if (step % 2 == 0) {
+                launchMortonSort(d_bodies, d_scratch, d_bbox, d_mortonKeys, d_mortonKeysOut, 
+                                 d_indicesIn, d_sortedIndices, d_tempStorage, tempStorageBytes, 0);
+            }
+            
+            launchBuildTree(tree, d_bodies, d_bbox, d_mortonKeysOut, leafCapacity, 0);
+            launchForceCalculation(d_bodies, tree, cfg.theta, cfg.G, cfg.softening, 
+                                   cfg.haloVcSq, cfg.haloCoreSq, 0);
+            
+            launchLeapfrogKick(d_bodies, cfg.dt, 0);
+        }
 
-        // Optional: Collision handling (best done after position update)
-        launchCollisionDetection(d_bodies, tree, 0);
-        
-        // Render
+        // ===== Render =====
         renderer.updateVBO(d_bodies, 0);
         cudaDeviceSynchronize();
         
@@ -239,24 +243,29 @@ int main() {
         frames++;
         auto now = std::chrono::high_resolution_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - lastTime).count() >= 1) {
-            std::string title = "CUDA N-Body Barnes-Hut | FPS: " + std::to_string(frames) + " | Bodies: " + std::to_string(d_bodies.count);
+            std::string title = "✦ " + cfg.name + " | FPS: " + std::to_string(frames) 
+                              + " | Bodies: " + std::to_string(d_bodies.count) 
+                              + " | θ=" + std::to_string(cfg.theta).substr(0,3);
             glfwSetWindowTitle(renderer.getWindow(), title.c_str());
             frames = 0;
             lastTime = now;
         }
     }
     
-    std::cout << "Window closed. Cleaning up..." << std::endl;
+    std::cout << std::endl << "Window closed. Cleaning up..." << std::endl;
     
     // Cleanup
     cudaFree(d_bbox);
     cudaFree(d_mortonKeys);
+    cudaFree(d_mortonKeysOut);
+    cudaFree(d_indicesIn);
     cudaFree(d_sortedIndices);
     if (d_tempStorage) cudaFree(d_tempStorage);
     if(tree.nodes) cudaFree(tree.nodes);
     if(tree.parents) cudaFree(tree.parents);
     if(tree.nodeCount) cudaFree(tree.nodeCount);
     bodiesFreeDevice(d_bodies);
+    bodiesFreeDevice(d_scratch);
 
     return 0;
 }

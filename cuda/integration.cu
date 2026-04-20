@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include "../include/body.h"
+#include "../include/kernels.cuh"
 
 // =====================================================================
 // Kernel 5: Leapfrog Integration (Kick-Drift-Kick, 2nd order symplectic)
@@ -15,15 +16,24 @@
 //   - Orbits stay stable for millions of timesteps (no energy drift)
 //   - Euler would cause planets to spiral inward or outward over time
 
+
 // Phase 1+2: Half-kick velocity, then full-drift position
 __global__ void kernelLeapfrogKickDrift(
     float* __restrict__ pos_x, float* __restrict__ pos_y,
     float* __restrict__ vel_x, float* __restrict__ vel_y,
     const float* __restrict__ acc_x, const float* __restrict__ acc_y,
+    const float* __restrict__ mass, // <-- ADDED MASS
     int n, float halfDt, float dt)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
+
+    // ANCHOR HEAVY MASSES: If it's a supermassive black hole, freeze it!
+    if (mass[i] >= 100000.0f) {
+        vel_x[i] = 0.0f;
+        vel_y[i] = 0.0f;
+        return; 
+    }
 
     // KICK: half-step velocity update using current acceleration
     float vx = vel_x[i] + acc_x[i] * halfDt;
@@ -42,10 +52,14 @@ __global__ void kernelLeapfrogKickDrift(
 __global__ void kernelLeapfrogKick(
     float* __restrict__ vel_x, float* __restrict__ vel_y,
     const float* __restrict__ acc_x, const float* __restrict__ acc_y,
+    const float* __restrict__ mass, // <-- ADDED MASS
     int n, float halfDt)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
+
+    // ANCHOR HEAVY MASSES
+    if (mass[i] >= 100000.0f) return;
 
     // KICK: complete the velocity update with new acceleration
     vel_x[i] += acc_x[i] * halfDt;
@@ -53,26 +67,28 @@ __global__ void kernelLeapfrogKick(
 }
 
 // Host launchers
-void launchLeapfrogKickDrift(Bodies& bodies, float dt, cudaStream_t stream = 0) {
+void launchLeapfrogKickDrift(Bodies& bodies, float dt, cudaStream_t stream) {
     if (bodies.count == 0) return;
     int blockSize = 256;
     int numBlocks = (bodies.count + blockSize - 1) / blockSize;
     float halfDt = dt * 0.5f;
     
+    // Pass bodies.mass to the kernel
     kernelLeapfrogKickDrift<<<numBlocks, blockSize, 0, stream>>>(
         bodies.pos_x, bodies.pos_y, bodies.vel_x, bodies.vel_y,
-        bodies.acc_x, bodies.acc_y, bodies.count, halfDt, dt
+        bodies.acc_x, bodies.acc_y, bodies.mass, bodies.count, halfDt, dt
     );
 }
 
-void launchLeapfrogKick(Bodies& bodies, float dt, cudaStream_t stream = 0) {
+void launchLeapfrogKick(Bodies& bodies, float dt, cudaStream_t stream) {
     if (bodies.count == 0) return;
     int blockSize = 256;
     int numBlocks = (bodies.count + blockSize - 1) / blockSize;
     float halfDt = dt * 0.5f;
     
+    // Pass bodies.mass to the kernel
     kernelLeapfrogKick<<<numBlocks, blockSize, 0, stream>>>(
         bodies.vel_x, bodies.vel_y,
-        bodies.acc_x, bodies.acc_y, bodies.count, halfDt
+        bodies.acc_x, bodies.acc_y, bodies.mass, bodies.count, halfDt
     );
 }

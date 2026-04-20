@@ -34,6 +34,10 @@ public:
     float getCameraY() const { return cameraY; }
     float getCameraZoom() const { return cameraZoom; }
     
+    void setCamera(float x, float y, float zoom) {
+        cameraX = x; cameraY = y; cameraZoom = zoom;
+    }
+    
     SpawnState spawnState;
 
 private:
@@ -51,6 +55,7 @@ private:
 
     GLuint compileShaders();
     
-    // GLFW callback (static because GLFW is C-style)
+    // GLFW callbacks (static because GLFW is C-style)
     static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
+    static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset);
 };

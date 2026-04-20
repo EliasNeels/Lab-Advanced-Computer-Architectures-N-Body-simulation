@@ -4,10 +4,33 @@
 #include "../include/body.h"
 #include "../include/cuda_utils.h"
 #include "../include/BoundingBox.h"
+#include "../include/kernels.cuh"
 
 // =====================================================================
 // Kernel 1: Bounding Box — Parallel min/max reduction
 // =====================================================================
+
+__device__ __forceinline__ float atomicMinFloat(float* address, float val) {
+    int* address_as_int = (int*)address;
+    int old = *address_as_int, assumed;
+    do {
+        assumed = old;
+        if (__int_as_float(assumed) <= val) break;
+        old = atomicCAS(address_as_int, assumed, __float_as_int(val));
+    } while (assumed != old);
+    return __int_as_float(old);
+}
+
+__device__ __forceinline__ float atomicMaxFloat(float* address, float val) {
+    int* address_as_int = (int*)address;
+    int old = *address_as_int, assumed;
+    do {
+        assumed = old;
+        if (__int_as_float(assumed) >= val) break;
+        old = atomicCAS(address_as_int, assumed, __float_as_int(val));
+    } while (assumed != old);
+    return __int_as_float(old);
+}
 
 __global__ void kernelBoundingBox(const float* __restrict__ pos_x,
                                    const float* __restrict__ pos_y,
@@ -58,12 +81,10 @@ __global__ void kernelBoundingBox(const float* __restrict__ pos_x,
 
     // Atomic update global result
     if (tid == 0) {
-        atomicMin((int*)d_min_x, __float_as_int(s_min_x[0]));
-        atomicMin((int*)d_min_y, __float_as_int(s_min_y[0]));
-        // For max, we negate to use atomicMin trick (only works for positive floats)
-        // Use atomicMax with int reinterpretation for positive floats
-        atomicMax((int*)d_max_x, __float_as_int(s_max_x[0]));
-        atomicMax((int*)d_max_y, __float_as_int(s_max_y[0]));
+        atomicMinFloat(d_min_x, s_min_x[0]);
+        atomicMinFloat(d_min_y, s_min_y[0]);
+        atomicMaxFloat(d_max_x, s_max_x[0]);
+        atomicMaxFloat(d_max_y, s_max_y[0]);
     }
 }
 

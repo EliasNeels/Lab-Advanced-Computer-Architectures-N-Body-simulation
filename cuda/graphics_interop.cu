@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include "../include/body.h"
+#include "../include/kernels.cuh"
 
 // =====================================================================
 // Graphics Interop Kernel

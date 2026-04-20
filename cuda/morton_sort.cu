@@ -5,6 +5,8 @@
 #include "../include/quadtree.h"
 #include "../include/cuda_utils.h"
 #include "../include/BoundingBox.h"
+#include "../include/kernels.cuh"
+#include <algorithm> // for std::swap
 
 
 // =====================================================================
@@ -25,21 +27,22 @@ __device__ __forceinline__ uint32_t morton2D(uint32_t x, uint32_t y) {
     return expandBits(x) | (expandBits(y) << 1);
 }
 
-// Compute Morton codes from normalized positions
+// Compute Morton codes from a perfectly squared bounding box
 __global__ void kernelComputeMortonCodes(const float* __restrict__ pos_x,
                                           const float* __restrict__ pos_y,
                                           int n,
-                                          float min_x, float min_y,
-                                          float range_x, float range_y,
+                                          float root_min_x, float root_min_y,
+                                          float size,
                                           uint32_t* __restrict__ mortonCodes) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
 
-    // Normalize to [0, 65535]
-    float nx = (pos_x[i] - min_x) / fmaxf(range_x, 1e-10f);
-    float ny = (pos_y[i] - min_y) / fmaxf(range_y, 1e-10f);
-    uint32_t ix = (uint32_t)fminf(nx * 65535.0f, 65535.0f);
-    uint32_t iy = (uint32_t)fminf(ny * 65535.0f, 65535.0f);
+    // Normalize to [0, 65535] using the SQUARE tree size, clamping out-of-bounds
+    float nx = (pos_x[i] - root_min_x) / size;
+    float ny = (pos_y[i] - root_min_y) / size;
+    
+    uint32_t ix = (uint32_t)fminf(fmaxf(nx * 65535.0f, 0.0f), 65535.0f);
+    uint32_t iy = (uint32_t)fminf(fmaxf(ny * 65535.0f, 0.0f), 65535.0f);
 
     mortonCodes[i] = morton2D(ix, iy);
 }
@@ -85,9 +88,12 @@ __global__ void kernelReorderBodies(const float* __restrict__ src_pos_x,
 }
 
 // Host launcher: compute morton codes, sort, reorder bodies
-void launchMortonSort(Bodies& bodies, const BoundingBox* d_bbox,
-                      uint32_t* d_mortonKeys, int* d_sortedIndices,
-                      void* d_tempStorage, size_t& tempStorageBytes,
+// ALL scratch buffers are pre-allocated by the caller — zero allocations here!
+void launchMortonSort(Bodies& bodies, Bodies& scratch,
+                      const BoundingBox* d_bbox,
+                      uint32_t* d_mortonKeys, uint32_t* d_mortonKeysOut,
+                      int* d_indicesIn, int* d_sortedIndices,
+                      void*& d_tempStorage, size_t& tempStorageBytes,
                       cudaStream_t stream) {
     int n = bodies.count;
     if (n == 0) return;
@@ -96,25 +102,24 @@ void launchMortonSort(Bodies& bodies, const BoundingBox* d_bbox,
     BoundingBox bbox;
     CUDA_CHECK(cudaMemcpy(&bbox, d_bbox, sizeof(BoundingBox), cudaMemcpyDeviceToHost));
 
-    float range_x = bbox.max_x - bbox.min_x;
-    float range_y = bbox.max_y - bbox.min_y;
+    // EXACT SAME math as the Quadtree root to ensure perfect geometric alignment
+    float cx = (bbox.min_x + bbox.max_x) * 0.5f;
+    float cy = (bbox.min_y + bbox.max_y) * 0.5f;
+    float size = fmaxf(bbox.max_x - bbox.min_x, bbox.max_y - bbox.min_y) * 1.001f;
+    float root_min_x = cx - size * 0.5f;
+    float root_min_y = cy - size * 0.5f;
 
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
 
-    // Step 1: Compute Morton codes
+    // Step 1: Compute Morton codes using square alignment
     kernelComputeMortonCodes<<<numBlocks, blockSize, 0, stream>>>(
         bodies.pos_x, bodies.pos_y, n,
-        bbox.min_x, bbox.min_y, range_x, range_y,
+        root_min_x, root_min_y, size,
         d_mortonKeys
     );
 
-    // Step 2: Initialize indices array [0, 1, 2, ..., n-1] on device
-    int* d_indicesIn;
-    uint32_t* d_keysOut;
-    CUDA_CHECK(cudaMalloc(&d_indicesIn, n * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_keysOut, n * sizeof(uint32_t)));
-
+    // Step 2: Initialize indices array [0, 1, 2, ..., n-1] (pre-allocated buffer)
     kernelInitIndices<<<numBlocks, blockSize, 0, stream>>>(d_indicesIn, n);
 
     // Step 3: CUB radix sort (key-value pairs: morton code -> body index)
@@ -122,9 +127,10 @@ void launchMortonSort(Bodies& bodies, const BoundingBox* d_bbox,
     
     // First call to determine temporary storage requirements
     cub::DeviceRadixSort::SortPairs(nullptr, tempBytes,
-                                     d_mortonKeys, d_keysOut,
+                                     d_mortonKeys, d_mortonKeysOut,
                                      d_indicesIn, d_sortedIndices, n, 0, 32, stream);
 
+    // Only reallocate if we need more space (should only happen once at startup)
     if (tempBytes > tempStorageBytes) {
         if (d_tempStorage) cudaFree(d_tempStorage);
         tempStorageBytes = tempBytes;
@@ -133,40 +139,29 @@ void launchMortonSort(Bodies& bodies, const BoundingBox* d_bbox,
 
     // Second call to actually sort
     cub::DeviceRadixSort::SortPairs(d_tempStorage, tempStorageBytes,
-                                     d_mortonKeys, d_keysOut,
+                                     d_mortonKeys, d_mortonKeysOut,
                                      d_indicesIn, d_sortedIndices, n, 0, 32, stream);
 
-    // Step 4: Reorder bodies in-place using double-buffering
-    // Allocate temporary body arrays
-    Bodies tmp;
-    bodiesAllocDevice(tmp, n);
-    tmp.count = n;
-
+    // Step 4: Reorder bodies from 'bodies' into 'scratch' using sorted indices
+    scratch.count = n;
     kernelReorderBodies<<<numBlocks, blockSize, 0, stream>>>(
         bodies.pos_x, bodies.pos_y, bodies.vel_x, bodies.vel_y,
         bodies.acc_x, bodies.acc_y, bodies.mass, bodies.radius,
-        tmp.pos_x, tmp.pos_y, tmp.vel_x, tmp.vel_y,
-        tmp.acc_x, tmp.acc_y, tmp.mass, tmp.radius,
+        scratch.pos_x, scratch.pos_y, scratch.vel_x, scratch.vel_y,
+        scratch.acc_x, scratch.acc_y, scratch.mass, scratch.radius,
         d_sortedIndices, n
     );
 
-    // Swap pointers (tmp now holds sorted data, so we replace the original arrays)
-    // First, free the original unsorted data
-    bodiesFreeDevice(bodies);
-    
-    // Then assign the temporary (now sorted) arrays to the original bodies struct
-    bodies.pos_x = tmp.pos_x;
-    bodies.pos_y = tmp.pos_y;
-    bodies.vel_x = tmp.vel_x;
-    bodies.vel_y = tmp.vel_y;
-    bodies.acc_x = tmp.acc_x;
-    bodies.acc_y = tmp.acc_y;
-    bodies.mass  = tmp.mass;
-    bodies.radius = tmp.radius;
-    bodies.capacity = tmp.capacity;
-    bodies.count = tmp.count;
-
-    // Clean up temporary allocations (except the ones we just moved to 'bodies')
-    cudaFree(d_indicesIn);
-    cudaFree(d_keysOut);
+    // Step 5: Swap pointers — O(1), zero GPU cost!
+    // 'scratch' now holds sorted data, so swap all array pointers.
+    // After this, 'bodies' points to sorted data, 'scratch' becomes the reusable buffer.
+    std::swap(bodies.pos_x, scratch.pos_x);
+    std::swap(bodies.pos_y, scratch.pos_y);
+    std::swap(bodies.vel_x, scratch.vel_x);
+    std::swap(bodies.vel_y, scratch.vel_y);
+    std::swap(bodies.acc_x, scratch.acc_x);
+    std::swap(bodies.acc_y, scratch.acc_y);
+    std::swap(bodies.mass, scratch.mass);
+    std::swap(bodies.radius, scratch.radius);
+    // capacity stays the same on both, count is updated
 }
