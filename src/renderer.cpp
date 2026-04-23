@@ -44,6 +44,7 @@ in float vRadius;
 in vec3 vWorldPos;
 
 uniform float uTime;
+uniform float uTwinkleAmount; // 0.0 to 1.0
 
 void main() {
     vec2 coord = gl_PointCoord * 2.0 - 1.0;
@@ -132,13 +133,13 @@ void main() {
         color = starColor * core * 1.5 + starColor * glow * 0.8;
         alpha = core + glow * 0.5;
         
-        // High-frequency procedural twinkling
-        float twinkle = 0.85 + 0.3 * sin(uTime * (3.0 + posHash * 5.0) + posHash * 6.28);
+        // Dynamic twinkling/breathing modulated by uTwinkleAmount
+        float twinkle = 1.0 + (0.95 + 0.05 * sin(uTime * 0.8 + posHash * 10.0) - 1.0) * uTwinkleAmount;
         
-        // Occasional Micro-flares on extremely bright stars randomly
-        if (posHash > 0.95) {
-            float mFlare = exp(-abs(coord.y) * 20.0 - abs(coord.x) * 20.0);
-            color += starColor * mFlare * 2.0;
+        // Occasional very subtle micro-flares (modulated by uTwinkleAmount)
+        if (posHash > 0.98) {
+            float mFlare = exp(-abs(coord.y) * 15.0 - abs(coord.x) * 15.0);
+            color += starColor * mFlare * (0.5 * uTwinkleAmount);
         }
         
         color *= twinkle;
@@ -154,10 +155,11 @@ Renderer::Renderer(int width, int height)
     : windowWidth(width), windowHeight(height), window(nullptr), 
       vao(0), vbo(0), shaderProgram(0), d_vbo_data(nullptr), h_vbo_data(nullptr),
       maxBodies(3000000),
-      loc_uMVP(-1), loc_uScreenHeight(-1), loc_uTime(-1),
+      loc_uMVP(-1), loc_uScreenHeight(-1), loc_uTime(-1), loc_uTwinkleAmount(-1),
       camTargetX(0), camTargetY(0), camTargetZ(0),
       camDistance(1500.0f), camTheta(0.0f), camPhi(0.4f),
-      mouseRotating(false), lastMouseX(0), lastMouseY(0)
+      mouseRotating(false), lastMouseX(0), lastMouseY(0),
+      twinkleAmount(0.0f)
 {}
 
 Renderer::~Renderer() {
@@ -203,6 +205,7 @@ bool Renderer::init() {
     loc_uMVP = glGetUniformLocation(shaderProgram, "uMVP");
     loc_uScreenHeight = glGetUniformLocation(shaderProgram, "uScreenHeight");
     loc_uTime = glGetUniformLocation(shaderProgram, "uTime");
+    loc_uTwinkleAmount = glGetUniformLocation(shaderProgram, "uTwinkleAmount");
 
     // Allocate CUDA staging buffer + pinned host buffer for fast D2H transfer
     cudaMalloc(&d_vbo_data, maxBodies * sizeof(float) * 4);
@@ -341,6 +344,7 @@ void Renderer::render(int bodyCount) {
     
     float time = (float)glfwGetTime();
     glUniform1f(loc_uTime, time);
+    glUniform1f(loc_uTwinkleAmount, twinkleAmount);
 
     glBindVertexArray(vao);
     glDrawArrays(GL_POINTS, 0, bodyCount);

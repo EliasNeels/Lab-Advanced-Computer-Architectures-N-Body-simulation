@@ -38,6 +38,8 @@ public:
         camDistance = distance; camTheta = theta; camPhi = phi;
     }
     
+    void setTwinkleAmount(float amt) { twinkleAmount = amt; }
+    
     SpawnState spawnState;
 
 private:
@@ -55,6 +57,7 @@ private:
     GLint loc_uMVP;
     GLint loc_uScreenHeight;
     GLint loc_uTime;
+    GLint loc_uTwinkleAmount;
 
     // 3D orbital camera (spherical coordinates)
     float camTargetX, camTargetY, camTargetZ;  // look-at point
@@ -65,6 +68,7 @@ private:
     // Mouse state for rotation
     bool mouseRotating;
     double lastMouseX, lastMouseY;
+    float twinkleAmount;
 
     GLuint compileShaders();
     

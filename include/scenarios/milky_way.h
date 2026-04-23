@@ -19,6 +19,7 @@ inline Scenario createMilkyWay() {
     s.config.haloCoreSq   = 2500.0f;
     s.config.subSteps     = 4;
     s.config.dt           = 0.1f;
+    s.config.twinkleAmount = 0.0f;
     s.config.camTargetX   = 0.0f;
     s.config.camTargetY   = 0.0f;
     s.config.camTargetZ   = 0.0f;

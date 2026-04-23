@@ -33,6 +33,9 @@ struct SimulationConfig {
     
     // Capacity headroom
     int extraCapacity;
+    
+    // Aesthetic options
+    float twinkleAmount; // 0.0 = static points, 1.0 = full breathing/twinkle
 };
 
 struct Scenario {

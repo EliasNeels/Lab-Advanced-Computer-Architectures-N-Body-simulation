@@ -26,6 +26,7 @@ inline Scenario createGalaxyCollision() {
     s.config.camTheta     = 0.0f;
     s.config.camPhi       = 0.6f;     // elevated view
     s.config.extraCapacity = 5000;
+    s.config.twinkleAmount = 1.0f;
     
     // Galaxy A: Large, tilted 15° around X axis
     addDiskGalaxy(s.bodies,

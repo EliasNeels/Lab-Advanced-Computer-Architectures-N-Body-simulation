@@ -29,6 +29,7 @@ inline Scenario createFpsBenchmark() {
     s.config.camTheta     = 0.5f;     
     s.config.camPhi       = 0.5f;     
     s.config.extraCapacity = 5000;
+    s.config.twinkleAmount = 0.0f;
     
     int N = 150000;
     float maxRadius = 800.0f;

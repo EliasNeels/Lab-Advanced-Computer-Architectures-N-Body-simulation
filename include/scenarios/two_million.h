@@ -28,6 +28,7 @@ inline Scenario createTwoMillionBodies() {
     s.config.camTheta     = 0.5f;     
     s.config.camPhi       = 0.5f;
     s.config.extraCapacity = 10000;
+    s.config.twinkleAmount = 0.0f;
     
     // Instead of addDiskGalaxy, we manually pump in 2,000,000 bodies!
     // We will allocate them as a massive sphere rotating gently.

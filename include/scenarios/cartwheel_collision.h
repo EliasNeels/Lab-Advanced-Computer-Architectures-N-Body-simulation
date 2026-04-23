@@ -30,6 +30,7 @@ inline Scenario createCartwheelCollision() {
     s.config.camTheta     = 0.0f;     
     s.config.camPhi       = 0.8f;     // High angle!
     s.config.extraCapacity = 5000;
+    s.config.twinkleAmount = 0.0f;
     
     // --- Target Galaxy (The massive spiral disk) ---
     // Sits perfectly flat (0 tilt), large and beautiful.

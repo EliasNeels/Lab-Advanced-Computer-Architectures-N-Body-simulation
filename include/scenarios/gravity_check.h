@@ -30,6 +30,7 @@ inline Scenario createGravityCheck() {
     s.config.camTheta     = 0.0f;
     s.config.camPhi       = 1.2f;
     s.config.extraCapacity = 1000;
+    s.config.twinkleAmount = 0.0f;
 
     float centralMass = 10000.0f;
     

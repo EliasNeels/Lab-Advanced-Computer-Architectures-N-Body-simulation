@@ -30,6 +30,7 @@ inline Scenario createChaoticAttractors() {
     s.config.camTheta     = 0.4f;     
     s.config.camPhi       = 0.5f;
     s.config.extraCapacity = 5000;
+    s.config.twinkleAmount = 0.0f;
     
     // By spawning 3 large disk galaxies extremely tight to the center (radius 300, distance 350)
     // They are instantly entangled and ripping each other's 15,000 stars into deep star streams.

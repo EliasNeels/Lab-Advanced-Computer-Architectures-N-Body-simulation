@@ -21,6 +21,7 @@
 #include "../include/scenarios/chaotic_attractors.h"
 #include "../include/scenarios/two_million.h"
 #include "../include/scenarios/gravity_check.h"
+#include "../include/scenarios/zen_nebula.h"
 
 int main(int argc, char** argv) {
     // =====================================================================
@@ -39,6 +40,7 @@ int main(int argc, char** argv) {
     std::cout << "║    5. Chaotic Attractors (Presentation!)        ║" << std::endl;
     std::cout << "║    6. N=2M Massive Benchmark (2,000,000 Bodies) ║" << std::endl;
     std::cout << "║    7. Gravity Sanity Check (Stable Orbits)      ║" << std::endl;
+    std::cout << "║    8. Zen Nebula (Ultra-Smooth Presentation)    ║" << std::endl;
     std::cout << "╚══════════════════════════════════════════════════╝" << std::endl;
     
     int selection = 0;
@@ -47,12 +49,12 @@ int main(int argc, char** argv) {
         selection = std::atoi(argv[1]);
     }
     
-    if (selection < 1 || selection > 7) {
-        std::cout << "\n  Enter choice (1-7): ";
+    if (selection < 1 || selection > 8) {
+        std::cout << "\n  Enter choice (1-8): ";
         std::cin >> selection;
     }
     
-    if (selection < 1 || selection > 7) {
+    if (selection < 1 || selection > 8) {
         std::cerr << "Invalid selection!" << std::endl;
         return -1;
     }
@@ -76,6 +78,10 @@ int main(int argc, char** argv) {
         case 7:
             scenario = createGravityCheck();
             leafCapacityOverride = 1; // High precision for few bodies
+            break;
+        case 8:
+            scenario = createZenNebula();
+            leafCapacityOverride = 32; // Optimized for 500k
             break;
     }
     
@@ -143,6 +149,7 @@ int main(int argc, char** argv) {
     }
     renderer.setCamera3D(cfg.camTargetX, cfg.camTargetY, cfg.camTargetZ,
                          cfg.camDistance, cfg.camTheta, cfg.camPhi);
+    renderer.setTwinkleAmount(cfg.twinkleAmount);
     
     auto lastTime = std::chrono::high_resolution_clock::now();
     int frames = 0;
