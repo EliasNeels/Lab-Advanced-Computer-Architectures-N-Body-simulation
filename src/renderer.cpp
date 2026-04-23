@@ -53,61 +53,99 @@ void main() {
     
     float dist = sqrt(distSq);
     
-    vec3 color;
-    float alpha;
+    vec3 color = vec3(0.0);
+    float alpha = 0.0;
     
     if (vRadius >= 5.0) {
-        // ===== SUPERMASSIVE BLACK HOLE =====
-        float core = exp(-distSq * 8.0);
-        float halo = exp(-distSq * 1.5);
-        float outerGlow = exp(-distSq * 0.5);
+        // ===== SUPERMASSIVE BLACK HOLE (Event Horizon) =====
+        // The definitive black event horizon shadow
+        float eventHorizon = smoothstep(0.12, 0.16, dist);
         
-        color = vec3(1.0) * core + vec3(1.0, 0.8, 0.3) * halo * 0.8 + vec3(0.8, 0.4, 0.1) * outerGlow * 0.4;
-        alpha = max(core, max(halo * 0.9, outerGlow * 0.5));
+        // Intense relativistic photon ring around the shadow boundary
+        float photonRing = exp(-pow(abs(dist - 0.20), 2.0) * 80.0);
+        
+        // Swirling fiery accretion disk
+        float accretion = exp(-pow(dist, 1.5) * 5.0);
+        float angle = atan(coord.y, coord.x);
+        
+        // Dynamic spiraling effect pulling around the rim
+        float swirl = sin(angle * 4.0 - uTime * 6.0) * 0.5 + 0.6;
+        
+        // Intense Black Hole palettes
+        vec3 fireColor = vec3(1.0, 0.35, 0.05); // High energy orange/red
+        vec3 jetColor = vec3(0.1, 0.4, 1.0);    // Core intense blue
+        
+        color = fireColor * accretion * swirl * 1.5 + vec3(1.0, 0.9, 0.8) * photonRing * 2.0;
+        
+        // Subtle relativistic jet flare on the Z axis (simulated vertically via screenspace Y)
+        float jet = exp(-abs(coord.x) * 40.0 - abs(coord.y) * 2.0) * exp(-distSq * 5.0);
+        color += jetColor * jet * 2.0;
+        
+        // Mathematically black out the core center
+        color *= eventHorizon;
+        
+        alpha = max(accretion, max(photonRing, jet)) * eventHorizon;
     }
     else if (vRadius > 1.2) {
-        // ===== SPAWNED / MASSIVE BODY =====
-        float core = exp(-distSq * 6.0);
-        float glow = exp(-distSq * 2.0);
-        float outerGlow = exp(-distSq * 0.8);
+        // ===== HUGE STARS / MEDIUM BLACK HOLES (Anamorphic Lens Flare) =====
+        float core = exp(-distSq * 10.0);
+        float glow = exp(-distSq * 3.0);
+        
+        // Horizontal anamorphic sci-fi flare
+        float flare = exp(-abs(coord.y) * 40.0 - abs(coord.x) * 1.5) * 1.5;
+        // Subtle vertical cross flare
+        float crossFlare = exp(-abs(coord.x) * 30.0 - abs(coord.y) * 2.0) * 0.5;
         
         float t = clamp((vRadius - 1.2) / 4.0, 0.0, 1.0);
-        vec3 smallColor = vec3(0.1, 0.6, 1.0);
-        vec3 bigColor   = vec3(0.9, 0.2, 0.5);
+        vec3 smallColor = vec3(0.0, 0.85, 1.0); // Electric Cyan
+        vec3 bigColor   = vec3(1.0, 0.1, 0.5);  // Hot Magenta
         vec3 baseColor = mix(smallColor, bigColor, t);
         
-        color = vec3(1.0) * core * 0.8 + baseColor * glow + baseColor * 0.3 * outerGlow;
-        alpha = max(core, max(glow * 0.8, outerGlow * 0.3));
+        color = vec3(1.0) * core + baseColor * glow * 1.2 + baseColor * (flare + crossFlare);
+        alpha = max(core, max(glow, flare));
     }
     else {
-        // ===== GALAXY STARS =====
+        // ===== GALAXY STARS (Cinematic Deep Space Palette) =====
         float posHash = fract(sin(dot(vWorldPos.xy * 0.01, vec2(12.9898, 78.233))) * 43758.5453);
         
         float galacticDist = length(vWorldPos);
-        float t = clamp(galacticDist / 600.0 + posHash * 0.15 - 0.075, 0.0, 1.0);
+        float t = clamp(galacticDist / 800.0 + posHash * 0.2 - 0.1, 0.0, 1.0);
         
-        vec3 bulgeColor = vec3(1.0, 0.7, 0.35);
-        vec3 diskColor  = vec3(1.0, 0.92, 0.78);
-        vec3 armColor   = vec3(0.65, 0.82, 1.0);
+        // Super vibrant cinematic colors
+        vec3 coreColor  = vec3(1.0, 0.95, 0.8);   // Blinding white-gold center
+        vec3 innerColor = vec3(0.0, 0.9, 1.0);    // Intense electric cyan
+        vec3 outerColor = vec3(0.4, 0.0, 1.0);    // Deep vibrant purple
+        vec3 armColor   = vec3(1.0, 0.05, 0.4);   // Hot pink edge tendrils
         
         vec3 starColor;
-        if (t < 0.35) {
-            starColor = mix(bulgeColor, diskColor, t / 0.35);
+        if (t < 0.2) {
+            starColor = mix(coreColor, innerColor, t / 0.2);
+        } else if (t < 0.6) {
+            starColor = mix(innerColor, outerColor, (t - 0.2) / 0.4);
         } else {
-            starColor = mix(diskColor, armColor, (t - 0.35) / 0.65);
+            starColor = mix(outerColor, armColor, (t - 0.6) / 0.4);
         }
         
-        float core = exp(-distSq * 4.0);
-        float glow = exp(-distSq * 1.5);
+        float core = exp(-distSq * 6.0);
+        float glow = exp(-distSq * 2.0);
         
-        color = starColor * core * 1.2 + starColor * 0.6 * glow;
-        alpha = core * 0.9 + glow * 0.35;
+        color = starColor * core * 1.5 + starColor * glow * 0.8;
+        alpha = core + glow * 0.5;
         
-        float twinkle = 0.9 + 0.1 * sin(uTime * 2.5 + posHash * 6.28);
+        // High-frequency procedural twinkling
+        float twinkle = 0.85 + 0.3 * sin(uTime * (3.0 + posHash * 5.0) + posHash * 6.28);
+        
+        // Occasional Micro-flares on extremely bright stars randomly
+        if (posHash > 0.95) {
+            float mFlare = exp(-abs(coord.y) * 20.0 - abs(coord.x) * 20.0);
+            color += starColor * mFlare * 2.0;
+        }
+        
         color *= twinkle;
         alpha *= twinkle;
     }
     
+    // Final composite output
     FragColor = vec4(color, alpha);
 }
 )";
@@ -115,7 +153,8 @@ void main() {
 Renderer::Renderer(int width, int height)
     : windowWidth(width), windowHeight(height), window(nullptr), 
       vao(0), vbo(0), shaderProgram(0), d_vbo_data(nullptr), h_vbo_data(nullptr),
-      maxBodies(1000000),
+      maxBodies(3000000),
+      loc_uMVP(-1), loc_uScreenHeight(-1), loc_uTime(-1),
       camTargetX(0), camTargetY(0), camTargetZ(0),
       camDistance(1500.0f), camTheta(0.0f), camPhi(0.4f),
       mouseRotating(false), lastMouseX(0), lastMouseY(0)
@@ -123,7 +162,7 @@ Renderer::Renderer(int width, int height)
 
 Renderer::~Renderer() {
     if (d_vbo_data) cudaFree(d_vbo_data);
-    if (h_vbo_data) delete[] h_vbo_data;
+    if (h_vbo_data) cudaFreeHost(h_vbo_data);
     if (vbo) glDeleteBuffers(1, &vbo);
     if (vao) glDeleteVertexArrays(1, &vao);
     if (shaderProgram) glDeleteProgram(shaderProgram);
@@ -160,8 +199,14 @@ bool Renderer::init() {
 
     shaderProgram = compileShaders();
 
+    // Cache uniform locations (avoids hash lookup every frame)
+    loc_uMVP = glGetUniformLocation(shaderProgram, "uMVP");
+    loc_uScreenHeight = glGetUniformLocation(shaderProgram, "uScreenHeight");
+    loc_uTime = glGetUniformLocation(shaderProgram, "uTime");
+
+    // Allocate CUDA staging buffer + pinned host buffer for fast D2H transfer
     cudaMalloc(&d_vbo_data, maxBodies * sizeof(float) * 4);
-    h_vbo_data = new float[maxBodies * 4];
+    cudaMallocHost(&h_vbo_data, maxBodies * sizeof(float) * 4);
     
     glGenVertexArrays(1, &vao);
     glGenBuffers(1, &vbo);
@@ -190,10 +235,15 @@ bool Renderer::init() {
 void Renderer::updateVBO(Bodies& bodies, cudaStream_t stream) {
     if (bodies.count == 0) return;
 
+    // Pack positions + radii into float4 array on GPU
     launchPackVBO(bodies, d_vbo_data, stream);
-    cudaMemcpyAsync(h_vbo_data, d_vbo_data, bodies.count * sizeof(float) * 4, cudaMemcpyDeviceToHost, stream);
+    
+    // D2H copy using pinned host memory (DMA transfer, ~2x faster than pageable)
+    cudaMemcpyAsync(h_vbo_data, d_vbo_data, bodies.count * sizeof(float) * 4, 
+                    cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
     
+    // Upload to OpenGL VBO
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, bodies.count * sizeof(float) * 4, h_vbo_data);
 }
@@ -285,11 +335,12 @@ void Renderer::render(int bodyCount) {
     Mat4 view = mat4LookAt(eyeX, eyeY, eyeZ, camTargetX, camTargetY, camTargetZ, 0, 1, 0);
     Mat4 mvp = mat4Multiply(proj, view);
 
-    glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "uMVP"), 1, GL_FALSE, mvp.m);
-    glUniform1f(glGetUniformLocation(shaderProgram, "uScreenHeight"), (float)height);
+    // Use cached uniform locations
+    glUniformMatrix4fv(loc_uMVP, 1, GL_FALSE, mvp.m);
+    glUniform1f(loc_uScreenHeight, (float)height);
     
     float time = (float)glfwGetTime();
-    glUniform1f(glGetUniformLocation(shaderProgram, "uTime"), time);
+    glUniform1f(loc_uTime, time);
 
     glBindVertexArray(vao);
     glDrawArrays(GL_POINTS, 0, bodyCount);

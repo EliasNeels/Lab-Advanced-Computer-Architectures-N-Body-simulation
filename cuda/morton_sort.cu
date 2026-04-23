@@ -10,6 +10,7 @@
 
 // =====================================================================
 // Kernel 2: 3D Morton Code Sort — Z-order curve in 3 dimensions
+//           Optimized: pinned bbox, __ldg for position reads
 // =====================================================================
 
 // Expand 10 bits to 30 bits with 2-bit gaps for 3D interleaving
@@ -30,15 +31,15 @@ __global__ void kernelComputeMortonCodes(const float* __restrict__ pos_x,
                                           const float* __restrict__ pos_z,
                                           int n,
                                           float root_min_x, float root_min_y, float root_min_z,
-                                          float size,
+                                          float inv_size,
                                           uint32_t* __restrict__ mortonCodes) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
 
     // Normalize to [0, 1023] (10 bits per dimension for 3D)
-    float nx = (pos_x[i] - root_min_x) / size;
-    float ny = (pos_y[i] - root_min_y) / size;
-    float nz = (pos_z[i] - root_min_z) / size;
+    float nx = (__ldg(&pos_x[i]) - root_min_x) * inv_size;
+    float ny = (__ldg(&pos_y[i]) - root_min_y) * inv_size;
+    float nz = (__ldg(&pos_z[i]) - root_min_z) * inv_size;
     
     uint32_t ix = (uint32_t)fminf(fmaxf(nx * 1023.0f, 0.0f), 1023.0f);
     uint32_t iy = (uint32_t)fminf(fmaxf(ny * 1023.0f, 0.0f), 1023.0f);
@@ -80,18 +81,27 @@ __global__ void kernelReorderBodies(const float* __restrict__ src_pos_x,
                                      int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    int src = sortedIndices[i];
-    dst_pos_x[i]  = src_pos_x[src];
-    dst_pos_y[i]  = src_pos_y[src];
-    dst_pos_z[i]  = src_pos_z[src];
-    dst_vel_x[i]  = src_vel_x[src];
-    dst_vel_y[i]  = src_vel_y[src];
-    dst_vel_z[i]  = src_vel_z[src];
-    dst_acc_x[i]  = src_acc_x[src];
-    dst_acc_y[i]  = src_acc_y[src];
-    dst_acc_z[i]  = src_acc_z[src];
-    dst_mass[i]   = src_mass[src];
-    dst_radius[i] = src_radius[src];
+    int src = __ldg(&sortedIndices[i]);
+    dst_pos_x[i]  = __ldg(&src_pos_x[src]);
+    dst_pos_y[i]  = __ldg(&src_pos_y[src]);
+    dst_pos_z[i]  = __ldg(&src_pos_z[src]);
+    dst_vel_x[i]  = __ldg(&src_vel_x[src]);
+    dst_vel_y[i]  = __ldg(&src_vel_y[src]);
+    dst_vel_z[i]  = __ldg(&src_vel_z[src]);
+    dst_acc_x[i]  = __ldg(&src_acc_x[src]);
+    dst_acc_y[i]  = __ldg(&src_acc_y[src]);
+    dst_acc_z[i]  = __ldg(&src_acc_z[src]);
+    dst_mass[i]   = __ldg(&src_mass[src]);
+    dst_radius[i] = __ldg(&src_radius[src]);
+}
+
+// Pinned host memory for bbox transfer (allocated once)
+static BoundingBox* h_pinnedMortonBbox = nullptr;
+
+static void ensureMortonPinnedMemory() {
+    if (h_pinnedMortonBbox == nullptr) {
+        CUDA_CHECK(cudaMallocHost(&h_pinnedMortonBbox, sizeof(BoundingBox)));
+    }
 }
 
 void launchMortonSort(Bodies& bodies, Bodies& scratch,
@@ -103,8 +113,13 @@ void launchMortonSort(Bodies& bodies, Bodies& scratch,
     int n = bodies.count;
     if (n == 0) return;
 
-    BoundingBox bbox;
-    CUDA_CHECK(cudaMemcpy(&bbox, d_bbox, sizeof(BoundingBox), cudaMemcpyDeviceToHost));
+    ensureMortonPinnedMemory();
+
+    // Use pinned memory for faster D2H transfer
+    CUDA_CHECK(cudaMemcpyAsync(h_pinnedMortonBbox, d_bbox, sizeof(BoundingBox), cudaMemcpyDeviceToHost, stream));
+    cudaStreamSynchronize(stream);
+
+    BoundingBox& bbox = *h_pinnedMortonBbox;
 
     // Compute cube root size (largest dimension) for uniform 3D grid
     float cx = (bbox.min_x + bbox.max_x) * 0.5f;
@@ -115,13 +130,14 @@ void launchMortonSort(Bodies& bodies, Bodies& scratch,
     float root_min_x = cx - size * 0.5f;
     float root_min_y = cy - size * 0.5f;
     float root_min_z = cz - size * 0.5f;
+    float inv_size = 1.0f / size;  // Precompute inverse to avoid per-thread division
 
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
 
     kernelComputeMortonCodes<<<numBlocks, blockSize, 0, stream>>>(
         bodies.pos_x, bodies.pos_y, bodies.pos_z, n,
-        root_min_x, root_min_y, root_min_z, size,
+        root_min_x, root_min_y, root_min_z, inv_size,
         d_mortonKeys
     );
 

@@ -31,6 +31,10 @@ void launchLeapfrogKickDrift(Bodies& bodies, float dt, cudaStream_t stream = 0);
 
 void launchLeapfrogKick(Bodies& bodies, float dt, cudaStream_t stream = 0);
 
+void launchLeapfrogFused(Bodies& bodies, 
+                          float* acc_old_x, float* acc_old_y, float* acc_old_z,
+                          float dt, cudaStream_t stream = 0);
+
 void launchCollisionDetection(Bodies& bodies, const Octree& tree, cudaStream_t stream = 0);
 
 void launchPackVBO(const Bodies& bodies, float* d_vbo, cudaStream_t stream = 0);

@@ -8,6 +8,7 @@
 
 // =====================================================================
 // Kernel 1: 3D Bounding Box — Parallel min/max reduction
+//           Optimized: warp shuffle reduction before shared memory
 // =====================================================================
 
 __device__ __forceinline__ float atomicMinFloat(float* address, float val) {
@@ -32,6 +33,19 @@ __device__ __forceinline__ float atomicMaxFloat(float* address, float val) {
     return __int_as_float(old);
 }
 
+// Warp-level min/max reduction (no shared memory needed within a warp)
+__device__ __forceinline__ float warpReduceMin(float val) {
+    for (int offset = 16; offset > 0; offset >>= 1)
+        val = fminf(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
+    return val;
+}
+
+__device__ __forceinline__ float warpReduceMax(float val) {
+    for (int offset = 16; offset > 0; offset >>= 1)
+        val = fmaxf(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
+    return val;
+}
+
 __global__ void kernelBoundingBox(const float* __restrict__ pos_x,
                                    const float* __restrict__ pos_y,
                                    const float* __restrict__ pos_z,
@@ -42,24 +56,29 @@ __global__ void kernelBoundingBox(const float* __restrict__ pos_x,
                                    float* __restrict__ d_max_x,
                                    float* __restrict__ d_max_y,
                                    float* __restrict__ d_max_z) {
+    // Shared memory only needed for inter-warp reduction (1 entry per warp)
+    const int warpsPerBlock = blockDim.x / 32;
     extern __shared__ float sdata[];
     float* s_min_x = sdata;
-    float* s_min_y = sdata + blockDim.x;
-    float* s_min_z = sdata + 2 * blockDim.x;
-    float* s_max_x = sdata + 3 * blockDim.x;
-    float* s_max_y = sdata + 4 * blockDim.x;
-    float* s_max_z = sdata + 5 * blockDim.x;
+    float* s_min_y = sdata + warpsPerBlock;
+    float* s_min_z = sdata + 2 * warpsPerBlock;
+    float* s_max_x = sdata + 3 * warpsPerBlock;
+    float* s_max_y = sdata + 4 * warpsPerBlock;
+    float* s_max_z = sdata + 5 * warpsPerBlock;
 
     int tid = threadIdx.x;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int laneId = tid & 31;
+    int warpId = tid >> 5;
 
     float local_min_x = FLT_MAX, local_min_y = FLT_MAX, local_min_z = FLT_MAX;
     float local_max_x = -FLT_MAX, local_max_y = -FLT_MAX, local_max_z = -FLT_MAX;
 
+    // Grid-stride loop for coalesced access
     for (int idx = i; idx < n; idx += blockDim.x * gridDim.x) {
-        float px = pos_x[idx];
-        float py = pos_y[idx];
-        float pz = pos_z[idx];
+        float px = __ldg(&pos_x[idx]);
+        float py = __ldg(&pos_y[idx]);
+        float pz = __ldg(&pos_z[idx]);
         local_min_x = fminf(local_min_x, px);
         local_min_y = fminf(local_min_y, py);
         local_min_z = fminf(local_min_z, pz);
@@ -68,33 +87,49 @@ __global__ void kernelBoundingBox(const float* __restrict__ pos_x,
         local_max_z = fmaxf(local_max_z, pz);
     }
 
-    s_min_x[tid] = local_min_x;
-    s_min_y[tid] = local_min_y;
-    s_min_z[tid] = local_min_z;
-    s_max_x[tid] = local_max_x;
-    s_max_y[tid] = local_max_y;
-    s_max_z[tid] = local_max_z;
+    // Warp-level reduction (no shared memory, no __syncthreads)
+    local_min_x = warpReduceMin(local_min_x);
+    local_min_y = warpReduceMin(local_min_y);
+    local_min_z = warpReduceMin(local_min_z);
+    local_max_x = warpReduceMax(local_max_x);
+    local_max_y = warpReduceMax(local_max_y);
+    local_max_z = warpReduceMax(local_max_z);
+
+    // Lane 0 of each warp writes to shared memory
+    if (laneId == 0) {
+        s_min_x[warpId] = local_min_x;
+        s_min_y[warpId] = local_min_y;
+        s_min_z[warpId] = local_min_z;
+        s_max_x[warpId] = local_max_x;
+        s_max_y[warpId] = local_max_y;
+        s_max_z[warpId] = local_max_z;
+    }
     __syncthreads();
 
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            s_min_x[tid] = fminf(s_min_x[tid], s_min_x[tid + s]);
-            s_min_y[tid] = fminf(s_min_y[tid], s_min_y[tid + s]);
-            s_min_z[tid] = fminf(s_min_z[tid], s_min_z[tid + s]);
-            s_max_x[tid] = fmaxf(s_max_x[tid], s_max_x[tid + s]);
-            s_max_y[tid] = fmaxf(s_max_y[tid], s_max_y[tid + s]);
-            s_max_z[tid] = fmaxf(s_max_z[tid], s_max_z[tid + s]);
-        }
-        __syncthreads();
-    }
+    // First warp reduces across all warps
+    if (warpId == 0) {
+        local_min_x = (laneId < warpsPerBlock) ? s_min_x[laneId] : FLT_MAX;
+        local_min_y = (laneId < warpsPerBlock) ? s_min_y[laneId] : FLT_MAX;
+        local_min_z = (laneId < warpsPerBlock) ? s_min_z[laneId] : FLT_MAX;
+        local_max_x = (laneId < warpsPerBlock) ? s_max_x[laneId] : -FLT_MAX;
+        local_max_y = (laneId < warpsPerBlock) ? s_max_y[laneId] : -FLT_MAX;
+        local_max_z = (laneId < warpsPerBlock) ? s_max_z[laneId] : -FLT_MAX;
 
-    if (tid == 0) {
-        atomicMinFloat(d_min_x, s_min_x[0]);
-        atomicMinFloat(d_min_y, s_min_y[0]);
-        atomicMinFloat(d_min_z, s_min_z[0]);
-        atomicMaxFloat(d_max_x, s_max_x[0]);
-        atomicMaxFloat(d_max_y, s_max_y[0]);
-        atomicMaxFloat(d_max_z, s_max_z[0]);
+        local_min_x = warpReduceMin(local_min_x);
+        local_min_y = warpReduceMin(local_min_y);
+        local_min_z = warpReduceMin(local_min_z);
+        local_max_x = warpReduceMax(local_max_x);
+        local_max_y = warpReduceMax(local_max_y);
+        local_max_z = warpReduceMax(local_max_z);
+
+        if (laneId == 0) {
+            atomicMinFloat(d_min_x, local_min_x);
+            atomicMinFloat(d_min_y, local_min_y);
+            atomicMinFloat(d_min_z, local_min_z);
+            atomicMaxFloat(d_max_x, local_max_x);
+            atomicMaxFloat(d_max_y, local_max_y);
+            atomicMaxFloat(d_max_z, local_max_z);
+        }
     }
 }
 
@@ -115,7 +150,8 @@ void launchBoundingBox(const Bodies& bodies, BoundingBox* d_bbox, cudaStream_t s
 
     int blockSize = 256;
     int numBlocks = min(256, (bodies.count + blockSize - 1) / blockSize);
-    int sharedMem = 6 * blockSize * sizeof(float);
+    int warpsPerBlock = blockSize / 32;
+    int sharedMem = 6 * warpsPerBlock * sizeof(float);  // Much less shared memory
 
     kernelBoundingBox<<<numBlocks, blockSize, sharedMem, stream>>>(
         bodies.pos_x, bodies.pos_y, bodies.pos_z, bodies.count,

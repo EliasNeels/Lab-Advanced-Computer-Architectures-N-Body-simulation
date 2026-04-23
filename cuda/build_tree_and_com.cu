@@ -8,6 +8,7 @@
 
 // =====================================================================
 // Kernel 3 & 4: GPU Octree Construction & Center of Mass (BFS Layer Method)
+//               Optimized: pinned host memory for nodeCount transfers
 // =====================================================================
 
 __global__ void kernelInitRoot(OctNode* nodes, float cx, float cy, float cz, float size, int n) {
@@ -145,10 +146,23 @@ __global__ void kernelCenterOfMass(OctNode* nodes, const float* pos_x, const flo
     }
 }
 
+// Pinned host memory for fast H↔D nodeCount transfers (allocated once)
+static int* h_pinnedNodeCount = nullptr;
+static BoundingBox* h_pinnedBbox = nullptr;
+
+static void ensurePinnedMemory() {
+    if (h_pinnedNodeCount == nullptr) {
+        CUDA_CHECK(cudaMallocHost(&h_pinnedNodeCount, sizeof(int)));
+        CUDA_CHECK(cudaMallocHost(&h_pinnedBbox, sizeof(BoundingBox)));
+    }
+}
+
 void launchBuildTree(Octree& tree, Bodies& bodies, const BoundingBox* d_bbox, const uint32_t* d_mortonCodes,
                      int leafCapacity, cudaStream_t stream) {
     int n = bodies.count;
     if (n == 0) return;
+
+    ensurePinnedMemory();
 
     int maxNodes = 8 * n + 1024;
     if (tree.nodes == nullptr || maxNodes > tree.maxNodes) {
@@ -161,18 +175,18 @@ void launchBuildTree(Octree& tree, Bodies& bodies, const BoundingBox* d_bbox, co
         CUDA_CHECK(cudaMalloc(&tree.nodeCount, sizeof(int)));
     }
 
-    BoundingBox h_bbox;
-    CUDA_CHECK(cudaMemcpyAsync(&h_bbox, d_bbox, sizeof(BoundingBox), cudaMemcpyDeviceToHost, stream));
+    // Use pinned memory for bbox transfer (much faster than pageable)
+    CUDA_CHECK(cudaMemcpyAsync(h_pinnedBbox, d_bbox, sizeof(BoundingBox), cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream); 
     
-    float cx = (h_bbox.min_x + h_bbox.max_x) * 0.5f;
-    float cy = (h_bbox.min_y + h_bbox.max_y) * 0.5f;
-    float cz = (h_bbox.min_z + h_bbox.max_z) * 0.5f;
-    float size = fmaxf(fmaxf(h_bbox.max_x - h_bbox.min_x, h_bbox.max_y - h_bbox.min_y),
-                       h_bbox.max_z - h_bbox.min_z) * 1.001f;
+    float cx = (h_pinnedBbox->min_x + h_pinnedBbox->max_x) * 0.5f;
+    float cy = (h_pinnedBbox->min_y + h_pinnedBbox->max_y) * 0.5f;
+    float cz = (h_pinnedBbox->min_z + h_pinnedBbox->max_z) * 0.5f;
+    float size = fmaxf(fmaxf(h_pinnedBbox->max_x - h_pinnedBbox->min_x, h_pinnedBbox->max_y - h_pinnedBbox->min_y),
+                       h_pinnedBbox->max_z - h_pinnedBbox->min_z) * 1.001f;
 
-    int initialCount = 1;
-    CUDA_CHECK(cudaMemcpyAsync(tree.nodeCount, &initialCount, sizeof(int), cudaMemcpyHostToDevice, stream));
+    *h_pinnedNodeCount = 1;
+    CUDA_CHECK(cudaMemcpyAsync(tree.nodeCount, h_pinnedNodeCount, sizeof(int), cudaMemcpyHostToDevice, stream));
 
     kernelInitRoot<<<1, 1, 0, stream>>>(tree.nodes, cx, cy, cz, size, n);
     
@@ -197,8 +211,10 @@ void launchBuildTree(Octree& tree, Bodies& bodies, const BoundingBox* d_bbox, co
         processedNodes += numNodesToProcess;
         currentLevel++;
         
-        CUDA_CHECK(cudaMemcpyAsync(&currentNodeCount, tree.nodeCount, sizeof(int), cudaMemcpyDeviceToHost, stream));
+        // Pinned memory enables faster async copy
+        CUDA_CHECK(cudaMemcpyAsync(h_pinnedNodeCount, tree.nodeCount, sizeof(int), cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
+        currentNodeCount = *h_pinnedNodeCount;
         
         levelBoundaries[currentLevel + 1] = currentNodeCount;
     }

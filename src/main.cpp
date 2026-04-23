@@ -16,6 +16,11 @@
 // ===== Scenario headers =====
 #include "../include/scenarios/milky_way.h"
 #include "../include/scenarios/galaxy_collision.h"
+#include "../include/scenarios/fps_benchmark.h"
+#include "../include/scenarios/cartwheel_collision.h"
+#include "../include/scenarios/chaotic_attractors.h"
+#include "../include/scenarios/two_million.h"
+#include "../include/scenarios/gravity_check.h"
 
 int main(int argc, char** argv) {
     // =====================================================================
@@ -29,6 +34,11 @@ int main(int argc, char** argv) {
     std::cout << "║  Select simulation:                             ║" << std::endl;
     std::cout << "║    1. Milky Way Galaxy                          ║" << std::endl;
     std::cout << "║    2. Galaxy Collision  ★                       ║" << std::endl;
+    std::cout << "║    3. FPS Benchmark (150k Bodies)               ║" << std::endl;
+    std::cout << "║    4. Cartwheel Collision (Presentation!)       ║" << std::endl;
+    std::cout << "║    5. Chaotic Attractors (Presentation!)        ║" << std::endl;
+    std::cout << "║    6. N=2M Massive Benchmark (2,000,000 Bodies) ║" << std::endl;
+    std::cout << "║    7. Gravity Sanity Check (Stable Orbits)      ║" << std::endl;
     std::cout << "╚══════════════════════════════════════════════════╝" << std::endl;
     
     int selection = 0;
@@ -37,12 +47,12 @@ int main(int argc, char** argv) {
         selection = std::atoi(argv[1]);
     }
     
-    if (selection < 1 || selection > 2) {
-        std::cout << "\n  Enter choice (1-2): ";
+    if (selection < 1 || selection > 7) {
+        std::cout << "\n  Enter choice (1-7): ";
         std::cin >> selection;
     }
     
-    if (selection < 1 || selection > 2) {
+    if (selection < 1 || selection > 7) {
         std::cerr << "Invalid selection!" << std::endl;
         return -1;
     }
@@ -51,9 +61,22 @@ int main(int argc, char** argv) {
     // Load Scenario
     // =====================================================================
     Scenario scenario;
+    int leafCapacityOverride = 16;
+    
     switch (selection) {
         case 1: scenario = createMilkyWay();         break;
         case 2: scenario = createGalaxyCollision();   break;
+        case 3: scenario = createFpsBenchmark();      break;
+        case 4: scenario = createCartwheelCollision(); break;
+        case 5: scenario = createChaoticAttractors(); break;
+        case 6: 
+            scenario = createTwoMillionBodies(); 
+            leafCapacityOverride = 64; 
+            break;
+        case 7:
+            scenario = createGravityCheck();
+            leafCapacityOverride = 1; // High precision for few bodies
+            break;
     }
     
     const SimulationConfig& cfg = scenario.config;
@@ -111,7 +134,7 @@ int main(int argc, char** argv) {
     tree.parents = nullptr;
     tree.nodeCount = nullptr;
     tree.maxNodes = 0;
-    int leafCapacity = 16;
+    int leafCapacity = leafCapacityOverride;
     
     Renderer renderer(1600, 1000);
     if (!renderer.init()) {
@@ -153,7 +176,7 @@ int main(int argc, char** argv) {
     std::cout << "╚══════════════════════════════════════════════════╝" << std::endl;
     
     // =====================================================================
-    // Main Simulation Loop
+    // Main Simulation Loop (Optimized)
     // =====================================================================
     while (!renderer.shouldClose()) {
         // ===== Handle mouse spawning =====
@@ -214,7 +237,8 @@ int main(int argc, char** argv) {
             
             launchBoundingBox(d_bodies, d_bbox, 0);
             
-            if (step % 2 == 0) {
+            // Morton sort once per frame (first substep only)
+            if (step == 0) {
                 launchMortonSort(d_bodies, d_scratch, d_bbox, d_mortonKeys, d_mortonKeysOut, 
                                  d_indicesIn, d_sortedIndices, d_tempStorage, tempStorageBytes, 0);
             }
@@ -228,10 +252,27 @@ int main(int argc, char** argv) {
 
         // ===== Render =====
         renderer.updateVBO(d_bodies, 0);
-        cudaDeviceSynchronize();
         
         renderer.render(d_bodies.count);
         renderer.swapBuffers();
+        
+        // // Debug: print first few body positions on frame 1
+        // if (frames == 0) {
+        //     float px[5], py[5], pz[5];
+        //     int check = std::min(5, d_bodies.count);
+        //     cudaMemcpy(px, d_bodies.pos_x, check * sizeof(float), cudaMemcpyDeviceToHost);
+        //     cudaMemcpy(py, d_bodies.pos_y, check * sizeof(float), cudaMemcpyDeviceToHost);
+        //     cudaMemcpy(pz, d_bodies.pos_z, check * sizeof(float), cudaMemcpyDeviceToHost);
+        //     std::cout << "[DEBUG] Frame 1 positions:" << std::endl;
+        //     for (int i = 0; i < check; i++) {
+        //         std::cout << "  Body " << i << ": (" << px[i] << ", " << py[i] << ", " << pz[i] << ")" << std::endl;
+        //     }
+        //     // Also check last CUDA error
+        //     cudaError_t err = cudaGetLastError();
+        //     if (err != cudaSuccess) {
+        //         std::cerr << "[DEBUG] CUDA error: " << cudaGetErrorString(err) << std::endl;
+        //     }
+        // }
         
         frames++;
         auto now = std::chrono::high_resolution_clock::now();

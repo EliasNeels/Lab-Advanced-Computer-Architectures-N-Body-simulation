@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 #include "cuda_utils.h"
 
-struct OctNode {
+struct __align__(64) OctNode {
     float center_x, center_y, center_z;  // octant center
     float size;                           // octant half-width
     float com_x, com_y, com_z;           // center of mass
@@ -12,6 +12,7 @@ struct OctNode {
     int   body_start;                     // start index in sorted body array
     int   body_count;                     // number of bodies in this node
     int   next;                           // next node for stackless traversal
+    float padding[4];                     // Pad to 64 bytes (16 floats total)
 };
 
 struct Octree {

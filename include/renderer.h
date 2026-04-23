@@ -48,8 +48,13 @@ private:
     GLuint shaderProgram;
 
     float* d_vbo_data;
-    float* h_vbo_data;
+    float* h_vbo_data;   // Pinned host staging buffer
     int maxBodies;
+
+    // Cached uniform locations (avoid glGetUniformLocation every frame)
+    GLint loc_uMVP;
+    GLint loc_uScreenHeight;
+    GLint loc_uTime;
 
     // 3D orbital camera (spherical coordinates)
     float camTargetX, camTargetY, camTargetZ;  // look-at point

@@ -6,9 +6,10 @@
 // =====================================================================
 // Kernel 5: 3D Force Calculation (Barnes-Hut Octree Traversal)
 //           + Analytic Dark Matter Halo (Logarithmic Potential)
+//           Optimized: __launch_bounds__ for register allocation
 // =====================================================================
 
-__global__ void kernelCalculateForces(
+__global__ void __launch_bounds__(256, 4) kernelCalculateForces(
     const float* __restrict__ pos_x, const float* __restrict__ pos_y, const float* __restrict__ pos_z,
     const float* __restrict__ mass, 
     float* __restrict__ acc_x, float* __restrict__ acc_y, float* __restrict__ acc_z,
@@ -22,6 +23,7 @@ __global__ void kernelCalculateForces(
     float py = pos_y[i];
     float pz = pos_z[i];
     
+    float thetaSq = theta * theta;
     float ax = 0.0f, ay = 0.0f, az = 0.0f;
 
     int curr = 0;
@@ -33,40 +35,50 @@ __global__ void kernelCalculateForces(
         float dy = node.com_y - py;
         float dz = node.com_z - pz;
         float distSq = dx * dx + dy * dy + dz * dz + softeningSq;
-        float dist = sqrtf(distSq);
         
-        if (node.children == 0 || (node.size / dist) < theta) {
+        float sizeSq = node.size * node.size;
+        
+        bool openNode = (node.children != 0) && (sizeSq >= thetaSq * distSq);
+        unsigned activeMask = __activemask();
+        int warpOpenNode = __any_sync(activeMask, openNode);
+        
+        if (warpOpenNode) {
+            curr = node.children;
+        } else {
             if (node.children == 0) { 
+                #pragma unroll 4
                 for (int b = node.body_start; b < node.body_start + node.body_count; b++) {
-                    if (b != i) {
-                        float b_dx = pos_x[b] - px;
-                        float b_dy = pos_y[b] - py;
-                        float b_dz = pos_z[b] - pz;
-                        float b_distSq = b_dx * b_dx + b_dy * b_dy + b_dz * b_dz + softeningSq;
-                        float invDist = rsqrtf(b_distSq);
-                        float invDist3 = invDist * invDist * invDist;
-                        
-                        ax += G * mass[b] * b_dx * invDist3;
-                        ay += G * mass[b] * b_dy * invDist3;
-                        az += G * mass[b] * b_dz * invDist3;
-                    }
+                    float b_dx = __ldg(&pos_x[b]) - px;
+                    float b_dy = __ldg(&pos_y[b]) - py;
+                    float b_dz = __ldg(&pos_z[b]) - pz;
+                    float b_distSq = b_dx * b_dx + b_dy * b_dy + b_dz * b_dz + softeningSq;
+                    float b_invDist = rsqrtf(b_distSq);
+                    float invDist3 = b_invDist * b_invDist * b_invDist;
+                    float final_mass = __ldg(&mass[b]) * invDist3;
+                    
+                    ax += final_mass * b_dx;
+                    ay += final_mass * b_dy;
+                    az += final_mass * b_dz;
                 }
             } else { 
-                float invDist = 1.0f / dist;
+                float invDist = rsqrtf(distSq);
                 float invDist3 = invDist * invDist * invDist;
+                float final_mass = node.total_mass * invDist3;
                 
-                ax += G * node.total_mass * dx * invDist3;
-                ay += G * node.total_mass * dy * invDist3;
-                az += G * node.total_mass * dz * invDist3;
+                ax += final_mass * dx;
+                ay += final_mass * dy;
+                az += final_mass * dz;
             }
             curr = node.next;
-        } else {
-            curr = node.children;
         }
     }
     
+    // Scale accumulated Barnes-Hut forces by G
+    ax *= G;
+    ay *= G;
+    az *= G;
+    
     // Dark matter halo (logarithmic potential, centered at origin)
-    // Only XY plane — galaxies are thin disks, halo acts in the plane
     float r_sq_halo = px * px + py * py + pz * pz + haloCoreSq;
     ax -= haloVcSq * px / r_sq_halo;
     ay -= haloVcSq * py / r_sq_halo;
